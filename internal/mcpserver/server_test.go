@@ -40,7 +40,10 @@ func TestMCPEndToEnd(t *testing.T) {
 	t.Cleanup(func() {
 		daemon.Call(context.Background(), "shutdown", nil, nil)
 		cmd.Wait()
-		exec.Command("pkill", "-f", "user-data-dir="+filepath.Join(home, "profile")).Run()
+		exec.Command("pkill", "-f", "user-data-dir="+home).Run()
+		for i := 0; i < 50 && exec.Command("pgrep", "-f", "user-data-dir="+home).Run() == nil; i++ {
+			time.Sleep(100 * time.Millisecond) // let Chrome exit before TempDir cleanup
+		}
 	})
 	for i := 0; i < 50 && daemon.Call(ctx, "ping", nil, nil) != nil; i++ {
 		time.Sleep(100 * time.Millisecond)
@@ -56,7 +59,7 @@ func TestMCPEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) < 20 {
+	if len(tools.Tools) < 21 {
 		t.Fatalf("only %d tools", len(tools.Tools))
 	}
 
@@ -104,6 +107,18 @@ func TestMCPEndToEnd(t *testing.T) {
 	if img, ok := res.Content[0].(*mcp.ImageContent); !ok || len(img.Data) < 1000 || img.MIMEType != "image/jpeg" {
 		t.Fatalf("screenshot content: %T", res.Content[0])
 	}
+	if out := callText("profile", map[string]any{"action": "add", "name": "second"}); !strings.Contains(out, `"second"`) {
+		t.Fatalf("profile add: %s", out)
+	}
+	callText("profile", map[string]any{"action": "use", "name": "second"})
+	if out := callText("navigate", map[string]any{"url": page}); !strings.Contains(out, `"Go"`) {
+		t.Fatalf("navigate on second profile: %s", out)
+	}
+	if out := callText("profile", map[string]any{}); !strings.Contains(out, `"connected":true`) || !strings.Contains(out, "profiles/second") {
+		t.Fatalf("profile list: %s", out)
+	}
+	callText("profile", map[string]any{"action": "use", "name": "default", "quit": true})
+
 	// Errors come back as tool errors, not protocol failures.
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "click", Arguments: map[string]any{"ref": "e9999"}})
 	if err != nil || !res.IsError {

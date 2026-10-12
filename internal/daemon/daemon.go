@@ -26,6 +26,7 @@ import (
 	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/llm"
 	"github.com/barockok/brojev/internal/page"
+	"github.com/barockok/brojev/internal/profile"
 )
 
 // Home is brojev's state dir: $BROJEV_HOME or ~/.brojev.
@@ -48,9 +49,10 @@ func SocketPath() string {
 	return filepath.Join("/tmp", fmt.Sprintf("brojevd-%d-%x.sock", os.Getuid(), sum[:6]))
 }
 
-func ProfileDir() string { return filepath.Join(Home(), "profile") }
-func LogPath() string    { return filepath.Join(Home(), "brojevd.log") }
-func chromeLog() string  { return filepath.Join(Home(), "chrome.log") }
+// ActiveProfile is the Chrome profile brojev drives (see package profile).
+func ActiveProfile() (profile.Profile, error) { return profile.Active(Home()) }
+func LogPath() string                         { return filepath.Join(Home(), "brojevd.log") }
+func chromeLog() string                       { return filepath.Join(Home(), "chrome.log") }
 
 type Request struct {
 	Method string          `json:"method"`
@@ -67,6 +69,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	browser  *browser.Browser
+	prof     profile.Profile // profile of the live connection
 	pages    map[target.ID]*page.Page
 	cur      target.ID
 	jev      *jev.Client
@@ -151,16 +154,24 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prof, err := ActiveProfile()
+	if err != nil {
+		return nil, err
+	}
 	if s.browser != nil {
 		select {
 		case <-s.browser.Done():
-			s.browser = nil // Chrome quit or the socket dropped
+			s.dropLocked() // Chrome quit or the socket dropped
 		default:
-			return s.browser, nil
+			if prof == s.prof {
+				return s.browser, nil
+			}
+			log.Printf("profile changed %s -> %s; reconnecting", s.prof.Name, prof.Name)
+			s.dropLocked()
 		}
 	}
-	attach := os.Getenv("BROJEV_ATTACH") == "1"
-	ep, launched, err := chrome.Ensure(ctx, chrome.Options{Profile: ProfileDir(), Headless: s.Headless, Log: chromeLog(), Attach: attach})
+	attach := prof.Attach
+	ep, launched, err := chrome.Ensure(ctx, chrome.Options{Profile: prof.Dir, ProfileDirectory: prof.ChromeProfile, Headless: s.Headless, Log: chromeLog(), Attach: attach})
 	if err != nil {
 		return nil, err
 	}
@@ -174,22 +185,35 @@ func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("connected to %s (launched=%v)", ep, launched)
+	log.Printf("connected to %s (profile=%s launched=%v)", ep, prof.Name, launched)
+	s.prof = prof
 	if err := b.EnableDownloads(ctx, filepath.Join(Home(), "downloads")); err != nil {
 		log.Printf("downloads: %v", err)
-	}
-	for _, p := range s.pages {
-		p.Close()
 	}
 	s.pages, s.cur = map[target.ID]*page.Page{}, ""
 	s.browser = b
 	return b, nil
 }
 
+// dropLocked forgets the live connection (Chrome itself keeps running).
+func (s *Server) dropLocked() {
+	for _, p := range s.pages {
+		p.Close()
+	}
+	s.pages, s.cur = map[target.ID]*page.Page{}, ""
+	if s.browser != nil {
+		s.browser.Close()
+		s.browser = nil
+	}
+	s.prof = profile.Profile{}
+}
+
 func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 	switch req.Method {
 	case "ping":
 		return map[string]any{"pid": os.Getpid(), "uptimeSec": int(time.Since(s.started).Seconds())}, nil
+	case "profile":
+		return s.profileTool(ctx, req.Params)
 	case "shutdown":
 		s.quitOnce.Do(func() { close(s.quit) })
 		return map[string]bool{"ok": true}, nil
@@ -217,7 +241,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		}
 		return map[string]any{
 			"product": v.Product, "protocol": v.ProtocolVersion, "endpoint": b.Endpoint,
-			"profile": ProfileDir(), "tabs": len(pages), "pid": os.Getpid(),
+			"profile": s.prof.Name, "profileDir": s.prof.Dir, "chromeProfile": s.prof.ChromeProfile, "attach": s.prof.Attach,
+			"tabs": len(pages), "pid": os.Getpid(),
 		}, nil
 	case "open":
 		var p struct {

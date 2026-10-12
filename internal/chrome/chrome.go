@@ -72,6 +72,8 @@ type Options struct {
 	// navigator.webdriver=true. Chrome asks the user to allow each new
 	// connection; brojevd holds one connection, so that is once per start.
 	Attach bool
+	// ProfileDirectory picks a person inside Profile ("Default", "Profile 3").
+	ProfileDirectory string
 }
 
 // Ensure returns the endpoint of a Chrome running on Profile, launching one
@@ -91,6 +93,9 @@ func Ensure(ctx context.Context, o Options) (endpoint string, launched bool, err
 	_ = os.Remove(filepath.Join(o.Profile, "DevToolsActivePort"))
 
 	args := []string{"--user-data-dir=" + o.Profile}
+	if o.ProfileDirectory != "" {
+		args = append(args, "--profile-directory="+o.ProfileDirectory)
+	}
 	if !o.Attach {
 		args = append(args, "--remote-debugging-port=0") // allowed because this is not the default profile
 	}

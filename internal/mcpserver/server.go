@@ -270,6 +270,15 @@ type EmulateIn struct {
 	Permissions []string `json:"permissions,omitempty" jsonschema:"pre-grant for the current origin: geolocation, notifications, clipboardReadWrite, camera, microphone"`
 }
 
+type ProfileIn struct {
+	Action        string `json:"action,omitempty" jsonschema:"list (default), current, chrome-profiles, add, use, remove"`
+	Name          string `json:"name,omitempty" jsonschema:"profile name; built-ins: default (dedicated ~/.brojev/profile), chrome (the user's real Chrome, attach mode)"`
+	Dir           string `json:"dir,omitempty" jsonschema:"add: Chrome user data dir (default ~/.brojev/profiles/<name>); chrome-profiles: dir to inspect"`
+	ChromeProfile string `json:"chromeProfile,omitempty" jsonschema:"add: person inside the data dir, e.g. Default or Profile 3 (list them with action=chrome-profiles)"`
+	Attach        bool   `json:"attach,omitempty" jsonschema:"add: connect via chrome://inspect remote debugging (needed for the real Chrome dir; avoids navigator.webdriver)"`
+	Quit          bool   `json:"quit,omitempty" jsonschema:"use: also close the previous profile's Chrome"`
+}
+
 type StateIn struct {
 	Action string `json:"action" jsonschema:"save or load"`
 	Path   string `json:"path,omitempty" jsonschema:"JSON file (default ~/.brojev/state.json)"`
@@ -298,6 +307,8 @@ func register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{Name: "tabs", Description: "List, open, switch to, or close tabs. New tabs opened by the page are reported after actions."}, tabsTool)
 	mcp.AddTool(s, &mcp.Tool{Name: "downloads", Description: "List downloads (saved to ~/.brojev/downloads under their real names) with state and path."}, plain[empty]("downloads"))
 	mcp.AddTool(s, &mcp.Tool{Name: "emulate", Description: "Emulate a device or environment: viewport/mobile/touch, geolocation, timezone, locale, color scheme, offline, and pre-granted permissions."}, emulateTool)
+	mcp.AddTool(s, &mcp.Tool{Name: "profile", Description: "List, inspect, add or switch the Chrome profile brojev drives. Each profile keeps its own logins. " +
+		"Switching only with the user's consent: the real Chrome profile exposes their personal sessions and sends page text to the Jev API."}, plain[ProfileIn]("profile"))
 	mcp.AddTool(s, &mcp.Tool{Name: "state", Description: "Save or load login state (all cookies plus localStorage of the current origin) to a JSON file."}, stateTool)
 }
 

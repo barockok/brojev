@@ -96,7 +96,12 @@ func (s *Server) current(ctx context.Context, b *browser.Browser) (*page.Page, e
 		return p, nil
 	}
 	if !alive {
-		if len(pages) == 0 {
+		s.mu.Lock()
+		attached := s.prof.Attach
+		s.mu.Unlock()
+		// On an attached (personal) browser never take over one of the
+		// user's tabs: brojev works in a tab of its own.
+		if len(pages) == 0 || attached {
 			info, err := b.Open(ctx, "about:blank")
 			if err != nil {
 				return nil, err

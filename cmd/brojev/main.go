@@ -58,6 +58,8 @@ func main() {
 		err = mcpserver.Run(context.Background())
 	case "bench":
 		err = runBench(args)
+	case "profile", "profiles":
+		err = runProfile(args)
 	case "stop":
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -82,6 +84,7 @@ func usage() {
   daemon [--headless] | doctor | status | stop
   run [--url U] [--value k=v]... [--file f]... [--expect text] [--json] <goal>
   bench [--out results.json] [--only name] [--repeat n] tasks.json
+  profile [list|current|chrome-profiles [name]|add <name> [--dir D] [--chrome-profile P] [--attach]|use <name> [--quit]|remove <name>]
   navigate <url> | back | forward | reload | snapshot | screenshot [full]
   click <ref> | hover <ref> | type <ref> <text> | select <ref> <value>... | key <combo> | keytype <text>
   scroll [ref] [dy] | drag <from> <to> | upload <ref> <file>... | dialog accept|dismiss [text]
@@ -409,6 +412,104 @@ func runBench(args []string) error {
 	return nil
 }
 
+// runProfile: brojev profile [list|current|add|use|remove|chrome-profiles] [name] [flags]
+func runProfile(args []string) error {
+	action := "list"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action, args = args[0], args[1:]
+	}
+	name := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		name, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("profile", flag.ExitOnError)
+	dir := fs.String("dir", "", "Chrome user data dir (add); default <home>/profiles/<name>")
+	sub := fs.String("chrome-profile", "", `person inside the data dir, e.g. "Default" or "Profile 3" (see: brojev profile chrome-profiles)`)
+	attach := fs.Bool("attach", false, "connect via chrome://inspect remote debugging (no debug-port launch)")
+	quit := fs.Bool("quit", false, "use: also close the previous profile's Chrome")
+	fs.Parse(args)
+	if name == "" && fs.NArg() > 0 {
+		name = fs.Arg(0)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := daemon.Ensure(ctx); err != nil {
+		return err
+	}
+	params := map[string]any{"action": action, "name": name, "dir": *dir, "chromeProfile": *sub, "attach": *attach, "quit": *quit}
+	var raw json.RawMessage
+	if err := daemon.Call(ctx, "profile", params, &raw); err != nil {
+		return err
+	}
+	switch action {
+	case "list", "remove":
+		var ps []struct {
+			Name          string `json:"name"`
+			Dir           string `json:"dir"`
+			ChromeProfile string `json:"chromeProfile"`
+			Attach        bool   `json:"attach"`
+			Builtin       bool   `json:"builtin"`
+			Active        bool   `json:"active"`
+			Connected     bool   `json:"connected"`
+			Exists        bool   `json:"exists"`
+		}
+		if json.Unmarshal(raw, &ps) == nil {
+			for _, p := range ps {
+				mark := " "
+				if p.Active {
+					mark = "*"
+				}
+				var tags []string
+				if p.Builtin {
+					tags = append(tags, "built-in")
+				}
+				if p.Attach {
+					tags = append(tags, "attach")
+				}
+				if p.Connected {
+					tags = append(tags, "connected")
+				}
+				if !p.Exists {
+					tags = append(tags, "new")
+				}
+				line := fmt.Sprintf("%s %-14s %s", mark, p.Name, p.Dir)
+				if p.ChromeProfile != "" {
+					line += fmt.Sprintf(" [%s]", p.ChromeProfile)
+				}
+				if len(tags) > 0 {
+					line += "  (" + strings.Join(tags, ", ") + ")"
+				}
+				fmt.Println(line)
+			}
+			return nil
+		}
+	case "chrome-profiles":
+		var r struct {
+			Dir  string `json:"dir"`
+			Subs []struct {
+				Directory string `json:"directory"`
+				Name      string `json:"name"`
+				Email     string `json:"email"`
+				LastUsed  bool   `json:"lastUsed"`
+			} `json:"chromeProfiles"`
+		}
+		if json.Unmarshal(raw, &r) == nil {
+			fmt.Println(r.Dir)
+			for _, x := range r.Subs {
+				last := ""
+				if x.LastUsed {
+					last = "  (last used)"
+				}
+				fmt.Printf("  %-12s %s %s%s\n", x.Directory, x.Name, x.Email, last)
+			}
+			return nil
+		}
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(raw)
+}
+
 type multiFlag []string
 
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
@@ -470,13 +571,23 @@ func doctor() error {
 	}
 
 	var st struct {
-		Product  string `json:"product"`
-		Endpoint string `json:"endpoint"`
-		Tabs     int    `json:"tabs"`
+		Product       string `json:"product"`
+		Endpoint      string `json:"endpoint"`
+		Tabs          int    `json:"tabs"`
+		Profile       string `json:"profile"`
+		ProfileDir    string `json:"profileDir"`
+		ChromeProfile string `json:"chromeProfile"`
 	}
 	start := time.Now()
 	err = daemon.Call(ctx, "status", nil, &st)
 	check("browser", err, fmt.Sprintf("%s, %d tabs, %s (%d ms)", st.Product, st.Tabs, st.Endpoint, time.Since(start).Milliseconds()))
+	if err == nil {
+		sub := ""
+		if st.ChromeProfile != "" {
+			sub = " [" + st.ChromeProfile + "]"
+		}
+		fmt.Printf("  [ok  ] %-18s %s %s%s\n", "profile", st.Profile, st.ProfileDir, sub)
+	}
 
 	if err == nil {
 		page := "data:text/html," + url.PathEscape("<title>brojev ok</title><p>hello")

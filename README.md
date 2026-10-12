@@ -51,7 +51,17 @@ brojev bench eval/tasks.json           # Jev loop on the live task suite
 brojev stop                            # stop the daemon (Chrome keeps running)
 ```
 
-Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (Chrome profile dir), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `TYPESAFE_MODEL`, `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
+Profiles (each with its own logins; `*` marks the active one):
+
+```sh
+brojev profile                                   # list
+brojev profile add work                          # new dedicated profile in ~/.brojev/profiles/work
+brojev profile chrome-profiles                   # people inside your real Chrome
+brojev profile add me --dir "~/Library/Application Support/Google/Chrome" --chrome-profile "Profile 3"   # attach mode is forced for the real dir
+brojev profile use work [--quit]                 # switch; --quit closes the previous profile's Chrome
+```
+
+Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `TYPESAFE_MODEL`, `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
 ## Tests
 
