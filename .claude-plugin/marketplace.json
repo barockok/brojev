@@ -1,0 +1,14 @@
+{
+  "name": "brojev-local",
+  "owner": {
+    "name": "Zidni Mubarok"
+  },
+  "description": "Local marketplace for the brojev browser agent plugin",
+  "plugins": [
+    {
+      "name": "brojev",
+      "source": "./",
+      "description": "Fast Jev-driven browser agent with Playwright-level primitives"
+    }
+  ]
+}

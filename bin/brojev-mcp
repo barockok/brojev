@@ -1,0 +1,13 @@
+#!/bin/sh
+# Launches the brojev MCP server, building the binary on first use.
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BIN="$ROOT/bin/brojev"
+if [ ! -x "$BIN" ] || [ -n "$(find "$ROOT/cmd" "$ROOT/internal" -newer "$BIN" -name '*.go' -o -newer "$BIN" -name '*.js' 2>/dev/null | head -1)" ]; then
+  if ! command -v go >/dev/null 2>&1; then
+    echo "brojev: Go is required to build the binary (https://go.dev/dl) or place a prebuilt brojev at $BIN" >&2
+    exit 1
+  fi
+  (cd "$ROOT" && go build -o "$BIN" ./cmd/brojev) >&2
+fi
+exec "$BIN" mcp

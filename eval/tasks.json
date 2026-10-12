@@ -1,0 +1,17 @@
+[
+  {"name": "wiki-godel", "url": "https://en.wikipedia.org/wiki/Main_Page", "goal": "Find and open the Wikipedia article about Gödel's incompleteness theorems.", "values": {"search": "Gödel's incompleteness theorems"}, "expect": "incompleteness theorems are two theorems"},
+  {"name": "wiki-godel-novalues", "url": "https://en.wikipedia.org/wiki/Main_Page", "goal": "Find and open the Wikipedia article about Gödel's incompleteness theorems.", "expect": "incompleteness theorems are two theorems"},
+  {"name": "ti-login", "url": "https://the-internet.herokuapp.com/login", "goal": "Log in with the provided username and password.", "values": {"username": "tomsmith", "password": "SuperSecretPassword!"}, "expect": "You logged into a secure area!"},
+  {"name": "ti-js-confirm", "url": "https://the-internet.herokuapp.com/javascript_alerts", "goal": "Click the 'Click for JS Confirm' button and accept the confirmation dialog.", "expect": "You clicked: Ok"},
+  {"name": "ti-js-confirm-cancel", "url": "https://the-internet.herokuapp.com/javascript_alerts", "goal": "Click the 'Click for JS Confirm' button and cancel the confirmation dialog.", "expect": "You clicked: Cancel"},
+  {"name": "ti-upload", "url": "https://the-internet.herokuapp.com/upload", "goal": "Upload the provided file and submit the upload form.", "files": ["fixtures/hello.txt"], "expect": "File Uploaded!"},
+  {"name": "ti-hovers", "url": "https://the-internet.herokuapp.com/hovers", "goal": "Hover over the second user avatar and open that user's profile link.", "expect": "Not Found"},
+  {"name": "ti-dynamic-loading", "url": "https://the-internet.herokuapp.com/dynamic_loading/1", "goal": "Start the loading and wait until the hidden text is shown.", "expect": "Hello World!"},
+  {"name": "ti-key-escape", "url": "https://the-internet.herokuapp.com/key_presses", "goal": "Focus the input field and press the Escape key.", "expect": "You entered: ESCAPE"},
+  {"name": "ti-dropdown", "url": "https://the-internet.herokuapp.com/dropdown", "goal": "Select 'Option 2' in the dropdown list."},
+  {"name": "ti-checkboxes", "url": "https://the-internet.herokuapp.com/checkboxes", "goal": "Make sure both checkboxes are checked. Do not uncheck any."},
+  {"name": "ti-drag", "url": "https://the-internet.herokuapp.com/drag_and_drop", "goal": "Drag box A onto box B."},
+  {"name": "books-light-attic", "url": "https://books.toscrape.com/", "goal": "Open the product page of the book 'A Light in the Attic'.", "expect": "£51.77"},
+  {"name": "books-travel", "url": "https://books.toscrape.com/", "goal": "Browse to the Travel category of books.", "expect": "It's Only the Himalayas"},
+  {"name": "hn-new", "url": "https://news.ycombinator.com/", "goal": "Open the page that lists the newest Hacker News submissions."}
+]
