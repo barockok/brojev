@@ -111,6 +111,10 @@ func Ensure(ctx context.Context, o Options) (endpoint string, launched bool, err
 	if o.Headless {
 		args = append(args, "--headless=new", "--window-size=1280,900")
 	}
+	if runtime.GOOS == "linux" && os.Getuid() == 0 {
+		// Chrome refuses to start as root with its sandbox (typical in containers)
+		args = append(args, "--no-sandbox")
+	}
 	args = append(args, "about:blank")
 
 	cmd := exec.Command(bin, args...)

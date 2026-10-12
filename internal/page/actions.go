@@ -447,17 +447,75 @@ func (p *Page) Scroll(ctx context.Context, r string, dx, dy float64) (*Result, e
 	return p.ScrollXY(ctx, x, y, dx, dy)
 }
 
+// scrollWatchJS(x, y, dx, dy) counts scroll events (capture on window sees
+// element scrolls too) and reports whether anything under the point can still
+// move in that direction. Settling is polled from Go with short evaluations:
+// on headless Linux Chrome a pending awaitPromise evaluation holds back the
+// wheel scroll itself, and a software-rendered Chrome can take over a second
+// to apply it.
+const scrollWatchJS = `((x, y, dx, dy) => {
+  globalThis.__brojevScroll = {n: 0, last: performance.now()};
+  if (!globalThis.__brojevScrollOn) {
+    globalThis.__brojevScrollOn = true;
+    addEventListener('scroll', () => { const s = globalThis.__brojevScroll; s.n++; s.last = performance.now(); }, {capture: true, passive: true});
+  }
+  const can = el => {
+    const st = getComputedStyle(el), root = el === document.scrollingElement;
+    const ok = v => root ? v !== 'hidden' && v !== 'clip' : v === 'auto' || v === 'scroll' || v === 'overlay';
+    const max = [el.scrollWidth - el.clientWidth, el.scrollHeight - el.clientHeight];
+    return (dy && ok(st.overflowY) && (dy < 0 ? el.scrollTop > 0 : el.scrollTop < max[1] - 1)) ||
+           (dx && ok(st.overflowX) && (dx < 0 ? el.scrollLeft > 0 : el.scrollLeft < max[0] - 1));
+  };
+  for (let el = document.elementFromPoint(x, y); el; el = el.parentElement)
+    if (can(el)) return true;
+  return !!document.scrollingElement && can(document.scrollingElement);
+})`
+
 func (p *Page) ScrollXY(ctx context.Context, x, y, dx, dy float64) (*Result, error) {
 	return p.do(ctx, func(ctx context.Context) error {
-		// Raw params: cdproto omits zero deltas, but Chrome requires both.
-		err := p.S.Call(ctx, "Input.dispatchMouseEvent", map[string]any{
-			"type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy,
-			"modifiers": p.keyboard().Modifiers(),
-		}, nil)
-		if err != nil {
+		var top *frame
+		canScroll := true
+		if fs, err := p.frames(ctx); err == nil && len(fs) > 0 {
+			expr := fmt.Sprintf("%s(%g, %g, %g, %g)", scrollWatchJS, x, y, dx, dy)
+			if p.eval(ctx, fs[0], expr, &canScroll) == nil {
+				top = fs[0]
+			}
+		}
+		mods := p.keyboard().Modifiers()
+		// Move the pointer over the target first, as a real wheel would be.
+		if err := p.S.Call(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseMoved", "x": x, "y": y, "modifiers": mods,
+		}, nil); err != nil {
 			return err
 		}
-		time.Sleep(60 * time.Millisecond) // wheel scrolling is async
+		// Raw params: cdproto omits zero deltas, but Chrome requires both.
+		if err := p.S.Call(ctx, "Input.dispatchMouseEvent", map[string]any{
+			"type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy, "modifiers": mods,
+		}, nil); err != nil {
+			return err
+		}
+		if top == nil {
+			time.Sleep(60 * time.Millisecond)
+			return nil
+		}
+		if !canScroll {
+			return nil // already at the limit (or the point is inside an iframe)
+		}
+		// Wait for the first scroll event, then until events stop for 100 ms.
+		start := time.Now()
+		for time.Since(start) < 2500*time.Millisecond {
+			time.Sleep(30 * time.Millisecond)
+			var st struct {
+				N     int     `json:"n"`
+				Quiet float64 `json:"quiet"`
+			}
+			if p.eval(ctx, top, "({n: globalThis.__brojevScroll.n, quiet: performance.now() - globalThis.__brojevScroll.last})", &st) != nil {
+				return nil
+			}
+			if st.N > 0 && st.Quiet > 100 {
+				return nil
+			}
+		}
 		return nil
 	})
 }
