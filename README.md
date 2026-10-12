@@ -7,7 +7,7 @@ A fast browser agent for Claude Code. One Go binary, its own Chrome DevTools Pro
 
 ## Install
 
-Requirements: Google Chrome (or Chromium) on macOS or Linux, and a TypeSafe API key for `run`. The primitives work without a key.
+Requirements: Google Chrome (or Chromium) on macOS or Linux, and your own TypeSafe API key for `run` (create one at [console.typesafe.ai/keys](https://console.typesafe.ai/keys); usage is billed to your TypeSafe account under [their terms](https://docs.typesafe.ai/legal.md)). The primitives work without a key.
 
 ```sh
 claude plugin marketplace add barockok/brojev
@@ -43,6 +43,20 @@ BROJEV_E2E=1 go test ./internal/page/ ./internal/mcpserver/   # against real hea
 ```
 
 Releases: bump `version` in `.claude-plugin/plugin.json`, then push a matching tag (`v0.1.0`). GitHub Actions builds the binaries with GoReleaser and publishes them with `checksums.txt`.
+
+## Data and privacy
+
+brojev runs locally. What leaves your machine:
+
+| Call | Sent | When |
+|---|---|---|
+| TypeSafe (`api.typesafe.ai`) | the goal, the `values` you pass, the page URL, title and snapshot (element roles, names, field values, visible text; password values are masked) | each `run` step |
+| OpenRouter (optional) | the goal, the target field and the snapshot | only when `run` must write field text you did not provide, or with `answer` |
+| Claude | tool results (snapshots, screenshots, eval output) | every MCP call, as part of your Claude Code conversation |
+
+The primitives (`snapshot`, `click`, ...) call no third-party service. With a personal Chrome profile (attach mode) the snapshot can contain whatever that page shows, including logged-in content: use a dedicated profile for anything you would not paste into a chat.
+
+Local state lives in `~/.brojev` (profiles, downloads, saved cookie/storage state, keys in `env`, daemon log). The daemon listens only on a unix socket readable by your user; launched Chrome exposes its debug port on 127.0.0.1, so other local programs running as you could connect to it while it is open.
 
 ## How it works
 
@@ -100,4 +114,4 @@ python3 eval/claude_bench.py --config brojev=a.json --config playwright=b.json  
 
 ## Credits
 
-Ideas from [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT). The keyboard layout and macOS editing-command tables are ported from [Playwright](https://github.com/microsoft/playwright) (Apache-2.0).
+Design and several agent rules are adapted from [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT, Copyright (c) 2026 Browser Use); brojev is an independent implementation and does not wrap it. The keyboard layout and macOS editing-command tables are ported from [Playwright](https://github.com/microsoft/playwright) (Apache-2.0).

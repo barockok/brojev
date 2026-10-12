@@ -20,5 +20,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+Portions of the agent rules (internal/agent/space.go) are adapted from
+browser-use/jev-ultrafast, Copyright (c) 2026 Browser Use, licensed under the
+MIT License (same terms as above).
+
 Portions (internal/keyboard) are derived from Playwright, Copyright Microsoft
 Corporation, licensed under the Apache License 2.0.

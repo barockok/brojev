@@ -1,8 +1,8 @@
 # Study: browser-use/jev-ultrafast
 
-Studied 2026-10-12. Clone at `workspace/gepa-browser-agent/jev-ultrafast`, HEAD `1231850` (3 commits; baseline for the perf comparison is `68c077b`). Nothing was run that calls a paid API; the repo was not modified.
+Studied 2026-10-12. Upstream [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) at HEAD `1231850` (3 commits; baseline for the perf comparison is `68c077b`). Nothing was run that calls a paid API; the repo was not modified.
 
-Sources read: every file in `jev_ultrafast/` (agent.py, model.py, questions.py, browser.py, snapshot.js, demo.py, `__init__.py`), README.md, AGENTS.md, docs/design.md, docs/performance.md, docs/performance-prepared.md, docs/*.json measurements, tests/test_agent.py, scripts/check_guards.py, scripts/measure_flights.py, scripts/smoke.py, examples/. Also `workspace/jev-sniper/NOTES.md`, its two docs, its `src/questions.ts` / `src/jev.ts`, the installed `@typesafe-ai/sdk` 0.6.0 type declarations, and docs.typesafe.ai (introduction, api, primitives, choice, advanced, state, confidence, fan-out, models, jev-1.13 jaggedness). Doc pages were fetched as markdown via `https://docs.typesafe.ai/<page>.md` (index at `/llms.txt`).
+Sources read: every file in `jev_ultrafast/` (agent.py, model.py, questions.py, browser.py, snapshot.js, demo.py, `__init__.py`), README.md, AGENTS.md, docs/design.md, docs/performance.md, docs/performance-prepared.md, docs/*.json measurements, tests/test_agent.py, scripts/check_guards.py, scripts/measure_flights.py, scripts/smoke.py, examples/. Also the `@typesafe-ai/sdk` 0.6.0 type declarations, and docs.typesafe.ai (introduction, api, primitives, choice, advanced, state, confidence, fan-out, models, jev-1.13 jaggedness). Doc pages were fetched as markdown via `https://docs.typesafe.ai/<page>.md` (index at `/llms.txt`).
 
 Whole package is about 850 lines of Python + 107 lines of JS. Dependencies: `browser-harness==0.1.13` (CDP transport) and `httpx[http2]`.
 
@@ -48,7 +48,7 @@ result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_
 ```
 `post_json` sends `Authorization: Bearer <key>`, retries on 429/529/503 with 0.5s and 1s backoff (3 attempts total), raises on any other HTTP error ("no action executed"). A single persistent HTTP/2 client keeps the connection warm, which matters at ~120 to 300 ms per call.
 
-API facts (docs, 2026-10-12): `model` is required (`jev-latest` -> `jev-1.13.0`; `jev-preview` currently identical). Pricing $0.042 per Mtok input, output free. Context: 64k tokens per request, 32k for `state` + the single longest question. Rate limits now listed as 100K tokens/s and 80 requests/s and "adjusting dynamically" (jev-sniper notes recorded 250k tok/s and 1200 rpm on 2026-09-20; the page changed). Errors: 401, 422 (validation), 429, 529. Text only, no images.
+API facts (docs, 2026-10-12): `model` is required (`jev-latest` -> `jev-1.13.0`; `jev-preview` currently identical). Pricing $0.042 per Mtok input, output free. Context: 64k tokens per request, 32k for `state` + the single longest question. Rate limits now listed as 100K tokens/s and 80 requests/s and "adjusting dynamically" (earlier notes recorded 250k tok/s and 1200 rpm on 2026-09-20; the page changed). Errors: 401, 422 (validation), 429, 529. Text only, no images.
 
 ### Body
 ```python
@@ -367,4 +367,4 @@ Development history worth remembering: relaxing freshness so an animating menu s
 - **Trim tokens**: avoid duplicating the full element list in both state and heads (keep state compact, put details in head criteria, or vice versa) and measure accuracy either way; cap label length; collapse large selects (offer the select as a target and the option via a second head or helper).
 - **Fresh example dates**: never hardcode dates in examples/tests; compute relative future dates in code.
 
-Initiative slug: `brojev`. Related prior work: `workspace/jev-sniper` (TypeSafe SDK usage and the "no numerics to Jev" rule).
+Related prior work: an earlier TypeSafe SDK project, the source of the "no numerics to Jev" rule.
