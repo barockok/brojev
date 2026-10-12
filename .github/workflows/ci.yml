@@ -19,15 +19,17 @@ jobs:
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - run: go test -race ./...
-      - uses: browser-actions/setup-chrome@v2
-        id: chrome
+      # The runner images ship Google Chrome stable, the browser users run.
+      # (Chrome for Testing 155 on macOS could not load any network URL.)
+      - name: Chrome version
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version; else google-chrome --version; fi
       - name: allow Chrome's sandbox (Ubuntu 24.04 restricts user namespaces)
         if: runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: e2e (real Chrome, headless)
         env:
           BROJEV_E2E: "1"
-          BROJEV_CHROME: ${{ steps.chrome.outputs.chrome-path }}
         run: go test -count=1 ./internal/page/ ./internal/mcpserver/
       - run: sh -n bin/brojev-mcp
 

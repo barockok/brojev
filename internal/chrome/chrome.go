@@ -115,6 +115,8 @@ func Ensure(ctx context.Context, o Options) (endpoint string, launched bool, err
 		// Chrome refuses to start as root with its sandbox (typical in containers)
 		args = append(args, "--no-sandbox")
 	}
+	// Extra flags, space separated (diagnostics, site-specific needs)
+	args = append(args, strings.Fields(os.Getenv("BROJEV_CHROME_ARGS"))...)
 	args = append(args, "about:blank")
 
 	cmd := exec.Command(bin, args...)
