@@ -611,7 +611,7 @@ func doctor() error {
 		key = "JEV_API_KEY"
 	}
 	if os.Getenv(key) == "" {
-		fmt.Println("  [warn] jev api key       TYPESAFE_API_KEY / JEV_API_KEY not set (needed from M2)")
+		fmt.Println("  [warn] jev api key       TYPESAFE_API_KEY not set (needed for run; primitives work without it)")
 	} else {
 		fmt.Printf("  [ok  ] %-18s %s set\n", "jev api key", key)
 	}
