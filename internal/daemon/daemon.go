@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/barockok/brojev/internal/version"
 	"log"
 	"net"
 	"os"
@@ -211,7 +212,7 @@ func (s *Server) dropLocked() {
 func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 	switch req.Method {
 	case "ping":
-		return map[string]any{"pid": os.Getpid(), "uptimeSec": int(time.Since(s.started).Seconds())}, nil
+		return map[string]any{"pid": os.Getpid(), "uptimeSec": int(time.Since(s.started).Seconds()), "version": version.Version}, nil
 	case "profile":
 		return s.profileTool(ctx, req.Params)
 	case "shutdown":
@@ -299,8 +300,18 @@ func Call(ctx context.Context, method string, params, out any) error {
 
 // Ensure starts brojevd in the background if it is not answering.
 func Ensure(ctx context.Context, extraArgs ...string) error {
-	if Call(ctx, "ping", nil, nil) == nil {
-		return nil
+	var ping struct {
+		Version string `json:"version"`
+	}
+	if Call(ctx, "ping", nil, &ping) == nil {
+		if ping.Version == version.Version {
+			return nil
+		}
+		// An upgraded binary: replace the old daemon (Chrome keeps running).
+		_ = Call(ctx, "shutdown", nil, nil)
+		for i := 0; i < 40 && Call(ctx, "ping", nil, nil) == nil; i++ {
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	exe, err := os.Executable()
 	if err != nil {

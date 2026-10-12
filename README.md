@@ -7,26 +7,42 @@ A fast browser agent for Claude Code. One Go binary, its own Chrome DevTools Pro
 
 ## Install
 
-Requirements: Google Chrome, Go 1.25+ (the plugin builds the binary on first use), a TypeSafe API key.
+Requirements: Google Chrome (or Chromium) on macOS or Linux, and a TypeSafe API key for `run`. The primitives work without a key.
 
 ```sh
-# keys (either the environment or this file)
+claude plugin marketplace add barockok/brojev
+claude plugin install brojev@brojev
+```
+
+On first start the plugin downloads the release binary for your platform (macOS or Linux, arm64 or amd64) into `~/.brojev/bin/<version>/`, verifies its checksum, and links it to `~/.brojev/bin/brojev`. Without a matching release it builds from source if Go 1.25+ is installed.
+
+Keys go in the environment or in `~/.brojev/env`:
+
+```sh
 mkdir -p ~/.brojev && cat > ~/.brojev/env <<'EOF'
 TYPESAFE_API_KEY=...
 OPENROUTER_API_KEY=...   # optional: helper that writes field text not covered by `values`
 EOF
 chmod 600 ~/.brojev/env
 
-# as a Claude Code plugin
-claude --plugin-dir /path/to/brojev            # quick, per session
-# or install from the bundled local marketplace
-claude plugin marketplace add /path/to/brojev
-claude plugin install brojev@brojev-local
-
-brojev doctor   # checks Chrome, daemon, connection, keys (bin/brojev after the first build)
+export PATH="$HOME/.brojev/bin:$PATH"   # optional: the brojev CLI
+brojev doctor                           # checks Chrome, daemon, connection, keys
 ```
 
 In Claude Code the tools appear as `mcp__plugin_brojev_brojev__run`, `..._snapshot`, and so on, and the `brojev` skill explains when to use which.
+
+On Linux, brojev adds `--no-sandbox` when it runs as root (containers), since Chrome refuses to start sandboxed as root. On a machine without a display, set `BROJEV_HEADLESS=1` (in the environment or `~/.brojev/env`) so the daemon starts Chrome headless.
+
+### From source
+
+```sh
+git clone https://github.com/barockok/brojev && cd brojev
+claude --plugin-dir .        # the launcher rebuilds bin/brojev whenever the source changes
+go test ./...                # unit tests
+BROJEV_E2E=1 go test ./internal/page/ ./internal/mcpserver/   # against real headless Chrome
+```
+
+Releases: bump `version` in `.claude-plugin/plugin.json`, then push a matching tag (`v0.1.0`). GitHub Actions builds the binaries with GoReleaser and publishes them with `checksums.txt`.
 
 ## How it works
 
@@ -66,7 +82,7 @@ Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrom
 ## Tests
 
 ```sh
-go test ./...                                     # unit tests (CDP client, keyboard)
+go test ./...                                     # unit tests
 BROJEV_E2E=1 go test ./internal/page/             # 15 browser tests on local fixtures, headless
 BROJEV_E2E=1 go test ./internal/agent/            # Jev loop against a fake Jev server
 BROJEV_E2E=1 go test ./internal/mcpserver/        # MCP client -> server -> daemon -> Chrome
@@ -77,6 +93,7 @@ python3 eval/claude_bench.py --config brojev=a.json --config playwright=b.json  
 ## Known limits
 
 - **`navigator.webdriver` is true** when Chrome is launched with a debug port (Chrome 154 behavior). Some sites may treat the browser as automated. `BROJEV_ATTACH=1` avoids the flag at the cost of one "Allow" click per daemon start.
+- Supported on macOS and Linux (arm64, amd64). Windows is not supported yet.
 - Closed shadow roots, canvas apps and OS-level UI need the coordinate and screenshot tools.
 - Jev is weak at numbers and comparisons ("cheapest", counting, date arithmetic): Claude should do those from snapshots and pass exact values.
 - Captchas are handed to the human. brojev does not try to bypass bot protection.

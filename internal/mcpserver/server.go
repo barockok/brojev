@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/barockok/brojev/internal/version"
 	"os"
 	"strings"
 	"time"
@@ -15,15 +16,13 @@ import (
 	"github.com/barockok/brojev/internal/daemon"
 )
 
-const Version = "0.1.0"
-
 // Run serves MCP on stdin/stdout until the client disconnects.
 func Run(ctx context.Context) error {
 	return New().Run(ctx, &mcp.StdioTransport{})
 }
 
 func New() *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "brojev", Version: Version}, &mcp.ServerOptions{Instructions: instructions})
+	s := mcp.NewServer(&mcp.Implementation{Name: "brojev", Version: version.Version}, &mcp.ServerOptions{Instructions: instructions})
 	register(s)
 	return s
 }

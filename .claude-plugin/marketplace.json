@@ -1,9 +1,9 @@
 {
-  "name": "brojev-local",
+  "name": "brojev",
   "owner": {
     "name": "Zidni Mubarok"
   },
-  "description": "Local marketplace for the brojev browser agent plugin",
+  "description": "brojev: fast browser agent plugin for Claude Code",
   "plugins": [
     {
       "name": "brojev",

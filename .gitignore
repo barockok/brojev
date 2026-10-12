@@ -1,2 +1,4 @@
 bin/brojev
 eval/results-*.json
+dist/
+NOTES.md

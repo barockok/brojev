@@ -1,13 +1,75 @@
 #!/bin/sh
-# Launches the brojev MCP server, building the binary on first use.
+# Launches the brojev MCP server.
+#
+# Installed plugin: downloads the release binary matching the plugin version
+# into ~/.brojev/bin/<version>/ (checksum verified), falling back to a source
+# build when Go is available. Git checkout with Go: builds from source on change.
+# Either way ~/.brojev/bin/brojev links to the binary in use, for the CLI.
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/bin/brojev"
-if [ ! -x "$BIN" ] || [ -n "$(find "$ROOT/cmd" "$ROOT/internal" -newer "$BIN" -name '*.go' -o -newer "$BIN" -name '*.js' 2>/dev/null | head -1)" ]; then
-  if ! command -v go >/dev/null 2>&1; then
-    echo "brojev: Go is required to build the binary (https://go.dev/dl) or place a prebuilt brojev at $BIN" >&2
+HOME_DIR="${BROJEV_HOME:-$HOME/.brojev}"
+REPO="barockok/brojev"
+VER="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -1)"
+
+say() { echo "brojev: $*" >&2; }
+
+link() {
+  mkdir -p "$HOME_DIR/bin"
+  ln -sf "$1" "$HOME_DIR/bin/brojev"
+}
+
+build() { # build <output>
+  (cd "$ROOT" && CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X github.com/barockok/brojev/internal/version.Version=$2" \
+    -o "$1" ./cmd/brojev) >&2
+}
+
+if [ -d "$ROOT/.git" ] && command -v go >/dev/null 2>&1; then
+  BIN="$ROOT/bin/brojev"
+  if [ ! -x "$BIN" ] || [ -n "$(find "$ROOT/cmd" "$ROOT/internal" -newer "$BIN" \( -name '*.go' -o -name '*.js' \) 2>/dev/null | head -1)" ]; then
+    build "$BIN" "$VER-dev"
+  fi
+  link "$BIN"
+  exec "$BIN" mcp
+fi
+
+BIN="$HOME_DIR/bin/$VER/brojev"
+if [ ! -x "$BIN" ]; then
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    arm64|aarch64) arch=arm64 ;;
+    *) arch="$(uname -m)" ;;
+  esac
+  asset="brojev_${os}_${arch}.tar.gz"
+  base="${BROJEV_RELEASE_URL:-https://github.com/$REPO/releases/download/v$VER}"
+  tmp="$(mktemp -d)"
+  mkdir -p "$HOME_DIR/bin/$VER"
+  if curl -fsSL "$base/$asset" -o "$tmp/$asset" && curl -fsSL "$base/checksums.txt" -o "$tmp/checksums.txt"; then
+    want="$(grep " $asset\$" "$tmp/checksums.txt" | cut -d' ' -f1)"
+    if command -v sha256sum >/dev/null 2>&1; then
+      got="$(sha256sum "$tmp/$asset" | cut -d' ' -f1)"
+    else
+      got="$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)"
+    fi
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+      say "checksum mismatch for $asset; refusing to install"
+      rm -rf "$tmp"
+      exit 1
+    fi
+    tar -xzf "$tmp/$asset" -C "$tmp" brojev
+    mv "$tmp/brojev" "$BIN"
+    chmod +x "$BIN"
+    say "installed $VER ($os/$arch)"
+  elif command -v go >/dev/null 2>&1; then
+    say "no release binary for v$VER $os/$arch; building from source"
+    build "$BIN" "$VER"
+  else
+    say "no release binary for v$VER $os/$arch and Go is not installed (https://go.dev/dl)"
+    rm -rf "$tmp"
     exit 1
   fi
-  (cd "$ROOT" && go build -o "$BIN" ./cmd/brojev) >&2
+  rm -rf "$tmp"
 fi
+link "$BIN"
 exec "$BIN" mcp

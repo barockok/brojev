@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/barockok/brojev/internal/version"
 	"net/url"
 	"os"
 	"os/signal"
@@ -35,6 +36,9 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
 	switch cmd {
+	case "version", "--version", "-v":
+		fmt.Println(version.Version)
+		return
 	case "daemon":
 		err = runDaemon(args)
 	case "doctor":
@@ -81,7 +85,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: brojev <command>
   mcp                                (MCP stdio server for Claude Code)
-  daemon [--headless] | doctor | status | stop
+  daemon [--headless] | doctor | status | stop | version
   run [--url U] [--value k=v]... [--file f]... [--expect text] [--json] <goal>
   bench [--out results.json] [--only name] [--repeat n] tasks.json
   profile [list|current|chrome-profiles [name]|add <name> [--dir D] [--chrome-profile P] [--attach]|use <name> [--quit]|remove <name>]
@@ -516,10 +520,10 @@ func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func runDaemon(args []string) error {
+	daemon.LoadEnvFile() // before flags: BROJEV_HEADLESS may come from the env file
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	headless := fs.Bool("headless", os.Getenv("BROJEV_HEADLESS") == "1", "run Chrome headless")
 	fs.Parse(args)
-	daemon.LoadEnvFile()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return (&daemon.Server{Headless: *headless}).Serve(ctx)

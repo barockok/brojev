@@ -1,0 +1,30 @@
+version: 2
+project_name: brojev
+
+builds:
+  - id: brojev
+    main: ./cmd/brojev
+    binary: brojev
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/barockok/brojev/internal/version.Version={{ .Version }}
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    # bin/brojev-mcp downloads brojev_<os>_<arch>.tar.gz for the plugin version
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  filters:
+    exclude: ["^docs:", "^test:", "^ci:"]
+
+release:
+  draft: false

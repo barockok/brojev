@@ -1,0 +1,44 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go test -race ./...
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - name: allow Chrome's sandbox (Ubuntu 24.04 restricts user namespaces)
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: e2e (real Chrome, headless)
+        env:
+          BROJEV_E2E: "1"
+          BROJEV_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: go test -count=1 ./internal/page/ ./internal/mcpserver/
+      - run: sh -n bin/brojev-mcp
+
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: |
+          for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/brojev
+          done
