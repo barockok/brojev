@@ -1,4 +1,5 @@
-// Package jev is a minimal client for TypeSafe's Jev (System One) API.
+// Package jev is a minimal client for TypeSafe's Jev (System One) API,
+// called directly or through OpenRouter.
 package jev
 
 import (
@@ -14,7 +15,10 @@ import (
 	"time"
 )
 
-const DefaultEndpoint = "https://api.typesafe.ai/v1/systemone"
+const (
+	DefaultEndpoint    = "https://api.typesafe.ai/v1/systemone"
+	OpenRouterEndpoint = "https://openrouter.ai/api/v1/systemone"
+)
 
 // PricePerMTokInput is USD per million input tokens (output is free).
 const PricePerMTokInput = 0.042
@@ -26,20 +30,39 @@ type Client struct {
 	HTTP     *http.Client
 }
 
-// FromEnv reads TYPESAFE_API_KEY (or JEV_API_KEY), TYPESAFE_MODEL.
-func FromEnv() (*Client, error) {
-	key := os.Getenv("TYPESAFE_API_KEY")
-	if key == "" {
-		key = os.Getenv("JEV_API_KEY")
+// KeyFromEnv picks the key and endpoint. TYPESAFE_API_KEY (or JEV_API_KEY)
+// calls TypeSafe directly; otherwise OPENROUTER_API_KEY calls Jev through
+// OpenRouter, which serves the same API at the same token price (about 200 ms
+// more per request). JEV_ENDPOINT overrides the URL. name is the variable used.
+func KeyFromEnv() (key, endpoint, name string) {
+	for _, n := range []string{"TYPESAFE_API_KEY", "JEV_API_KEY"} {
+		if v := os.Getenv(n); v != "" {
+			key, endpoint, name = v, DefaultEndpoint, n
+			break
+		}
 	}
 	if key == "" {
-		return nil, errors.New("jev: TYPESAFE_API_KEY or JEV_API_KEY not set")
+		if v := os.Getenv("OPENROUTER_API_KEY"); v != "" {
+			key, endpoint, name = v, OpenRouterEndpoint, "OPENROUTER_API_KEY"
+		}
+	}
+	if e := os.Getenv("JEV_ENDPOINT"); e != "" && key != "" {
+		endpoint = e
+	}
+	return key, endpoint, name
+}
+
+// FromEnv builds a client from KeyFromEnv and TYPESAFE_MODEL.
+func FromEnv() (*Client, error) {
+	key, endpoint, _ := KeyFromEnv()
+	if key == "" {
+		return nil, errors.New("jev: no API key: set OPENROUTER_API_KEY (or TYPESAFE_API_KEY to call TypeSafe directly)")
 	}
 	model := os.Getenv("TYPESAFE_MODEL")
 	if model == "" {
 		model = "jev-latest"
 	}
-	return &Client{Key: key, Model: model, Endpoint: DefaultEndpoint, HTTP: &http.Client{Timeout: 25 * time.Second}}, nil
+	return &Client{Key: key, Model: model, Endpoint: endpoint, HTTP: &http.Client{Timeout: 25 * time.Second}}, nil
 }
 
 // Choice is a question whose answer is one of Criteria's keys.

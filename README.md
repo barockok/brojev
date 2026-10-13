@@ -2,12 +2,12 @@
 
 A fast browser agent for Claude Code. One Go binary, its own Chrome DevTools Protocol engine, no Playwright, no browser extension.
 
-- **`run`**: hand over a whole browser sub-task. [TypeSafe's Jev](https://docs.typesafe.ai) picks each action (operation and target in one request, about 200 to 350 ms), brojev executes it with real input events, and the task usually finishes in 1 to 10 seconds for a fraction of a cent.
+- **`run`**: hand over a whole browser sub-task. [TypeSafe's Jev](https://docs.typesafe.ai) (through OpenRouter) picks each action (operation and target in one request, about 300 to 550 ms through OpenRouter), brojev executes it with real input events, and the task usually finishes in 1 to 10 seconds for a fraction of a cent.
 - **Primitives**: snapshot, click, type, select, key, hover, scroll, drag, upload, dialog, tabs, history, wait, screenshot, eval, emulate, state, downloads. Use them when `run` hands back, or for exact control. They cover what Playwright covers: iframes (including cross-site, out-of-process ones), open shadow DOM, JS dialogs, file choosers, downloads, popups, HTML5 and pointer drag, nested scrolling, macOS editing shortcuts, device emulation, cookies and storage.
 
 ## Install
 
-Requirements: Google Chrome (or Chromium) on macOS or Linux, and your own TypeSafe API key for `run` (create one at [console.typesafe.ai/keys](https://console.typesafe.ai/keys); usage is billed to your TypeSafe account under [their terms](https://docs.typesafe.ai/legal.md)). The primitives work without a key.
+Requirements: Google Chrome (or Chromium) on macOS or Linux, and your own [OpenRouter API key](https://openrouter.ai/settings/keys) for `run`, billed to your OpenRouter account. The primitives work without a key.
 
 ```sh
 claude plugin marketplace add barockok/brojev
@@ -18,16 +18,18 @@ At session start the plugin's hook downloads the release binary for your platfor
 
 ### API keys
 
-Claude Code asks for the plugin's settings on install: `typesafe_api_key` and the optional `openrouter_api_key` (a helper model that writes form text you did not pass in `values`). Both are marked sensitive, so Claude Code keeps them in your OS keychain and hands them to the brojev MCP server. To set them from the shell instead:
+`run` needs one key: `openrouter_api_key`. It pays for Jev (OpenRouter serves TypeSafe's System One API at TypeSafe's own token price, $0.042 per million input tokens, output free) and for the helper model that writes form text you did not pass in `values`. Claude Code asks for it on install, marks it sensitive, keeps it in your OS keychain and hands it to the brojev MCP server. To set it from the shell instead:
 
 ```sh
-claude plugin install brojev@brojev --config typesafe_api_key=...
+claude plugin install brojev@brojev --config openrouter_api_key=...
 ```
+
+Optional: a `typesafe_api_key` ([console.typesafe.ai/keys](https://console.typesafe.ai/keys)) makes brojev call Jev at TypeSafe directly, which saves about 200 ms per step; the helper still uses OpenRouter.
 
 Outside Claude Code (the CLI, or if you prefer a file), keys can also come from the environment or `~/.brojev/env`; plugin settings win when both are set:
 
 ```sh
-mkdir -p ~/.brojev && printf 'TYPESAFE_API_KEY=...\n' > ~/.brojev/env && chmod 600 ~/.brojev/env
+mkdir -p ~/.brojev && printf 'OPENROUTER_API_KEY=...\n' > ~/.brojev/env && chmod 600 ~/.brojev/env
 export PATH="$HOME/.brojev/bin:$PATH"   # optional: the brojev CLI
 brojev doctor                           # checks Chrome, daemon, connection, keys
 ```
@@ -68,8 +70,8 @@ brojev runs locally. What leaves your machine:
 
 | Call | Sent | When |
 |---|---|---|
-| TypeSafe (`api.typesafe.ai`) | the goal, the `values` you pass, the page URL, title and snapshot (element roles, names, field values, visible text; password values are masked) | each `run` step |
-| OpenRouter (optional) | the goal, the target field and the snapshot | only when `run` must write field text you did not provide, or with `answer` |
+| Jev, through OpenRouter (`openrouter.ai`) to TypeSafe, or `api.typesafe.ai` directly with a TypeSafe key | the goal, the `values` you pass, the page URL, title and snapshot (element roles, names, field values, visible text; password values are masked) | each `run` step |
+| Helper model on OpenRouter | the goal, the target field and the snapshot | only when `run` must write field text you did not provide, or with `answer` |
 | Claude | tool results (snapshots, screenshots, eval output) | every MCP call, as part of your Claude Code conversation |
 
 The primitives (`snapshot`, `click`, ...) call no third-party service. With a personal Chrome profile (attach mode) the snapshot can contain whatever that page shows, including logged-in content: use a dedicated profile for anything you would not paste into a chat.
@@ -109,7 +111,7 @@ brojev profile add me --dir "~/Library/Application Support/Google/Chrome" --chro
 brojev profile use work [--quit]                 # switch; --quit closes the previous profile's Chrome
 ```
 
-Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `TYPESAFE_MODEL`, `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
+Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `TYPESAFE_MODEL`, `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
 ## Tests
 

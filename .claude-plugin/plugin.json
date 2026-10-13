@@ -17,16 +17,16 @@
     "chrome"
   ],
   "userConfig": {
-    "typesafe_api_key": {
-      "type": "string",
-      "title": "TypeSafe API key",
-      "description": "Used by the run tool (Jev). Create one at https://console.typesafe.ai/keys. Leave empty to use only the primitive tools or to keep the key in ~/.brojev/env.",
-      "sensitive": true
-    },
     "openrouter_api_key": {
       "type": "string",
-      "title": "OpenRouter API key (optional)",
-      "description": "Optional helper model that writes form text you did not pass in values. Leave empty to skip.",
+      "title": "OpenRouter API key",
+      "description": "Used by the run tool: Jev (through OpenRouter) and the helper model that writes form text. Create one at https://openrouter.ai/settings/keys. Leave empty to use only the primitive tools or to keep the key in ~/.brojev/env.",
+      "sensitive": true
+    },
+    "typesafe_api_key": {
+      "type": "string",
+      "title": "TypeSafe API key (optional)",
+      "description": "Calls Jev at TypeSafe directly instead of through OpenRouter, about 200 ms faster per step. Create one at https://console.typesafe.ai/keys. Leave empty to use OpenRouter.",
       "sensitive": true
     }
   }

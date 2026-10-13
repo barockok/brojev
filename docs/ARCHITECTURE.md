@@ -67,6 +67,6 @@ Native select/date/color popups: set value via JS. OS file pickers (`showOpenFil
 
 ## Decisions (2026-10-12, user)
 1. **Language: Go.** Single static binary `brojev` with subcommands `daemon`, `mcp`, `doctor`, `run`.
-   Deps: `github.com/coder/websocket` (CDP transport), `github.com/chromedp/cdproto` (generated protocol types only, not a driver), `github.com/modelcontextprotocol/go-sdk` (MCP stdio). TypeSafe client hand-rolled (no Go SDK; one POST endpoint).
+   Deps: `github.com/coder/websocket` (CDP transport), `github.com/chromedp/cdproto` (generated protocol types only, not a driver), `github.com/modelcontextprotocol/go-sdk` (MCP stdio). TypeSafe client hand-rolled (no Go SDK; one POST endpoint, `api.typesafe.ai` or the same System One API on OpenRouter).
    Note: Go does not cut per-step latency much (Jev ~180 ms + Chrome dominate); wins are startup, concurrency, zero-runtime install.
 2. **Default browser: dedicated profile.** Daemon launches headed Chrome with `--user-data-dir=~/.brojev/profile --remote-debugging-port=0` (allowed on non-default profiles), reads DevToolsActivePort. User logs in to sites once in that profile. Real-profile attach (chrome://inspect toggle) is a later opt-in flag.

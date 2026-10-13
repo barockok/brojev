@@ -26,6 +26,7 @@ import (
 	"github.com/barockok/brojev/internal/browser"
 	"github.com/barockok/brojev/internal/chrome"
 	"github.com/barockok/brojev/internal/daemon"
+	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/mcpserver"
 )
 
@@ -608,14 +609,10 @@ func doctor() error {
 		}
 	}
 
-	key := "TYPESAFE_API_KEY"
-	if os.Getenv(key) == "" && os.Getenv("JEV_API_KEY") != "" {
-		key = "JEV_API_KEY"
-	}
-	if os.Getenv(key) == "" {
-		fmt.Println("  [warn] jev api key       TYPESAFE_API_KEY not in the environment or ~/.brojev/env (the plugin passes it from its settings; needed for run only)")
+	if _, endpoint, name := jev.KeyFromEnv(); name == "" {
+		fmt.Println("  [warn] jev api key       OPENROUTER_API_KEY not in the environment or ~/.brojev/env (the plugin passes it from its settings; needed for run only)")
 	} else {
-		fmt.Printf("  [ok  ] %-18s %s set\n", "jev api key", key)
+		fmt.Printf("  [ok  ] %-18s %s set (%s)\n", "jev api key", name, endpoint)
 	}
 	if failed {
 		return fmt.Errorf("some checks failed; logs in %s", daemon.Home())
