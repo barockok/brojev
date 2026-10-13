@@ -12,9 +12,25 @@ import (
 // to the long-lived daemon, which may predate this Claude session.
 var keyNames = []string{"TYPESAFE_API_KEY", "JEV_API_KEY", "OPENROUTER_API_KEY", "TEXT_MODEL_API_KEY", "JEV_PROVIDER"}
 
-// CleanKeyEnv unsets empty key variables and unexpanded "${...}" placeholders
-// (an unset userConfig value), so ~/.brojev/env can still provide them.
+// settingPrefix marks plugin settings in the MCP server's environment. The
+// plugin passes them under their own names (BROJEV_SETTING_OPENROUTER_API_KEY)
+// because an unset setting would otherwise replace a key exported in the
+// user's shell with an empty value.
+const settingPrefix = "BROJEV_SETTING_"
+
+// CleanKeyEnv applies plugin settings over the inherited environment, then
+// unsets empty key variables and unexpanded "${...}" placeholders, so the
+// shell environment and then ~/.brojev/env can still provide them.
+// Precedence: plugin setting, environment, ~/.brojev/env.
 func CleanKeyEnv() {
+	for _, k := range keyNames {
+		if v, ok := os.LookupEnv(settingPrefix + k); ok {
+			os.Unsetenv(settingPrefix + k)
+			if strings.TrimSpace(v) != "" && !strings.HasPrefix(v, "${") {
+				os.Setenv(k, v)
+			}
+		}
+	}
 	for _, k := range keyNames {
 		if v, ok := os.LookupEnv(k); ok && (strings.TrimSpace(v) == "" || strings.HasPrefix(v, "${")) {
 			os.Unsetenv(k)

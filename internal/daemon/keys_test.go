@@ -46,3 +46,26 @@ func TestKeys(t *testing.T) {
 		t.Fatalf("after clear: ts set=%v provider=%q", ok, os.Getenv("JEV_PROVIDER"))
 	}
 }
+
+func TestPluginSettings(t *testing.T) {
+	// Unset setting: the shell's key survives.
+	t.Setenv("OPENROUTER_API_KEY", "from-shell")
+	t.Setenv("BROJEV_SETTING_OPENROUTER_API_KEY", "${user_config.openrouter_api_key}")
+	// Set setting: wins over the shell.
+	t.Setenv("TYPESAFE_API_KEY", "from-shell")
+	t.Setenv("BROJEV_SETTING_TYPESAFE_API_KEY", "from-setting")
+	t.Setenv("BROJEV_SETTING_JEV_PROVIDER", "")
+	t.Setenv("JEV_PROVIDER", "")
+	CleanKeyEnv()
+	if got := os.Getenv("OPENROUTER_API_KEY"); got != "from-shell" {
+		t.Fatalf("OPENROUTER_API_KEY = %q", got)
+	}
+	if got := os.Getenv("TYPESAFE_API_KEY"); got != "from-setting" {
+		t.Fatalf("TYPESAFE_API_KEY = %q", got)
+	}
+	for _, k := range []string{"BROJEV_SETTING_OPENROUTER_API_KEY", "BROJEV_SETTING_TYPESAFE_API_KEY", "BROJEV_SETTING_JEV_PROVIDER", "JEV_PROVIDER"} {
+		if _, ok := os.LookupEnv(k); ok {
+			t.Fatalf("%s should be unset", k)
+		}
+	}
+}
