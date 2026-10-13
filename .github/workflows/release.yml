@@ -16,10 +16,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: tag matches plugin version
-        run: |
-          want="v$(jq -r .version .claude-plugin/plugin.json)"
-          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != plugin.json $want"; exit 1; }
+      - name: tag matches plugin.json version and marketplace ref
+        run: scripts/check-version.sh "$GITHUB_REF_NAME"
       - run: go test ./...
       - uses: goreleaser/goreleaser-action@v7
         with:

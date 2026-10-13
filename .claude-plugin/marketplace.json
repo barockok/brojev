@@ -7,7 +7,11 @@
   "plugins": [
     {
       "name": "brojev",
-      "source": "./",
+      "source": {
+        "source": "github",
+        "repo": "barockok/brojev",
+        "ref": "v0.1.0"
+      },
       "description": "Fast Jev-driven browser agent with Playwright-level primitives"
     }
   ]

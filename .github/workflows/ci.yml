@@ -16,6 +16,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - run: scripts/check-version.sh
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - run: go test -race ./...
