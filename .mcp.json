@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "brojev": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/brojev-mcp",
-      "args": []
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/brojev-mcp",
+      "args": [],
+      "env": {
+        "BROJEV_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
     }
   }
 }

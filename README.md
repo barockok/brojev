@@ -14,7 +14,7 @@ claude plugin marketplace add barockok/brojev
 claude plugin install brojev@brojev
 ```
 
-On first start the plugin downloads the release binary for your platform (macOS or Linux, arm64 or amd64) into `~/.brojev/bin/<version>/`, verifies its checksum, and links it to `~/.brojev/bin/brojev`. Without a matching release it builds from source if Go 1.25+ is installed.
+At session start the plugin's hook downloads the release binary for your platform (macOS or Linux, arm64 or amd64) into the plugin data directory (`~/.claude/plugins/data/<plugin id>/bin/<version>/`), verifies its checksum, removes older versions, and links it to `~/.brojev/bin/brojev`. Without a matching release it builds from source if Go 1.25+ is installed, and swaps in the release binary once one is available. Uninstalling the plugin removes the data directory.
 
 Keys go in the environment or in `~/.brojev/env`:
 
@@ -37,7 +37,7 @@ On Linux, brojev adds `--no-sandbox` when it runs as root (containers), since Ch
 
 ```sh
 git clone https://github.com/barockok/brojev && cd brojev
-claude --plugin-dir .        # the launcher rebuilds bin/brojev whenever the source changes
+claude --plugin-dir .        # rebuilds build/brojev whenever the source changes
 go test ./...                # unit tests
 BROJEV_E2E=1 go test ./internal/page/ ./internal/mcpserver/   # against real headless Chrome
 ```

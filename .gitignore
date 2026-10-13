@@ -1,4 +1,4 @@
-bin/brojev
+build/
 eval/results-*.json
 dist/
 NOTES.md

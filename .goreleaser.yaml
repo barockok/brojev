@@ -14,7 +14,7 @@ builds:
 
 archives:
   - formats: [tar.gz]
-    # bin/brojev-mcp downloads brojev_<os>_<arch>.tar.gz for the plugin version
+    # scripts/install downloads brojev_<os>_<arch>.tar.gz for the plugin version
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
     files: [LICENSE, README.md]
 

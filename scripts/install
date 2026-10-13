@@ -1,0 +1,149 @@
+#!/bin/sh
+# Installs the brojev binary for this plugin version and prints nothing on
+# stdout unless --print is given (then: the binary path). Run by the
+# SessionStart hook, and by the MCP launcher as a fallback; a lock makes
+# concurrent runs wait for one install.
+#
+# Plugin install: release binary for the plugin version into
+#   ${CLAUDE_PLUGIN_DATA}/bin/<version>/brojev (checksum verified),
+# fetched with curl, or with an authenticated gh for a private repo. Without
+# a release it builds from source when Go is available and marks the build,
+# so a later run replaces it with the release binary.
+# Git checkout with Go: builds build/brojev from source whenever it changes.
+# Either way ~/.brojev/bin/brojev links to the binary in use, for the CLI.
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="barockok/brojev"
+HOME_DIR="${BROJEV_HOME:-$HOME/.brojev}"
+VER="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -1)"
+PRINT=""
+[ "$1" = "--print" ] && PRINT=1
+
+say() { echo "brojev: $*" >&2; }
+
+# An unexpanded ${...} placeholder counts as unset.
+clean() { case "$1" in '${'*) echo "" ;; *) echo "$1" ;; esac; }
+DATA="$(clean "${BROJEV_PLUGIN_DATA:-}")"
+[ -n "$DATA" ] || DATA="$(clean "${CLAUDE_PLUGIN_DATA:-}")"
+[ -n "$DATA" ] || DATA="$HOME_DIR"
+BINDIR="$DATA/bin"
+
+done_with() { # done_with <binary>
+  mkdir -p "$HOME_DIR/bin"
+  ln -sf "$1" "$HOME_DIR/bin/brojev"
+  [ -n "$PRINT" ] && echo "$1"
+  exit 0
+}
+
+build() { # build <output> <version>
+  (cd "$ROOT" && CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X github.com/barockok/brojev/internal/version.Version=$2" \
+    -o "$1" ./cmd/brojev) >&2
+}
+
+if [ -d "$ROOT/.git" ] && command -v go >/dev/null 2>&1; then
+  BIN="$ROOT/build/brojev"
+  if [ ! -x "$BIN" ] || [ -n "$(find "$ROOT/cmd" "$ROOT/internal" -newer "$BIN" \( -name '*.go' -o -name '*.js' \) 2>/dev/null | head -1)" ]; then
+    mkdir -p "$ROOT/build"
+    build "$BIN" "$VER-dev"
+  fi
+  done_with "$BIN"
+fi
+
+DIR="$BINDIR/$VER"
+BIN="$DIR/brojev"
+MARK="$DIR/.source-build"
+# Installed release binary: nothing to do. A source build is retried against
+# the release at most every 6 hours.
+if [ -x "$BIN" ] && { [ ! -f "$MARK" ] || [ -z "$(find "$MARK" -mmin +360 2>/dev/null)" ]; }; then
+  done_with "$BIN"
+fi
+
+mkdir -p "$BINDIR"
+LOCK="$BINDIR/.lock"
+waited=0
+until mkdir "$LOCK" 2>/dev/null; do
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null || true # stale lock from a killed run
+    continue
+  fi
+  [ $waited -ge 300 ] && { say "timed out waiting for another install"; exit 1; }
+  sleep 1
+  waited=$((waited + 1))
+done
+tmp="$(mktemp -d)"
+cleanup() { rm -rf "$tmp"; rmdir "$LOCK" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+# Another run may have finished while we waited.
+if [ -x "$BIN" ] && [ ! -f "$MARK" ]; then
+  cleanup
+  trap - EXIT INT TERM
+  done_with "$BIN"
+fi
+
+os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$(uname -m)" in
+  x86_64|amd64) arch=amd64 ;;
+  arm64|aarch64) arch=arm64 ;;
+  *) arch="$(uname -m)" ;;
+esac
+asset="brojev_${os}_${arch}.tar.gz"
+
+fetch() { # release assets into $tmp: curl (public), then gh (private repo)
+  base="${BROJEV_RELEASE_URL:-https://github.com/$REPO/releases/download/v$VER}"
+  if curl -fsSL "$base/$asset" -o "$tmp/$asset" 2>/dev/null && curl -fsSL "$base/checksums.txt" -o "$tmp/checksums.txt" 2>/dev/null; then
+    return 0
+  fi
+  [ -z "${BROJEV_RELEASE_URL:-}" ] && command -v gh >/dev/null 2>&1 &&
+    gh release download "v$VER" -R "$REPO" -p "$asset" -p checksums.txt -D "$tmp" --clobber >/dev/null 2>&1
+}
+
+installed=""
+if fetch; then
+  want="$(grep " $asset\$" "$tmp/checksums.txt" | cut -d' ' -f1)"
+  if command -v sha256sum >/dev/null 2>&1; then
+    got="$(sha256sum "$tmp/$asset" | cut -d' ' -f1)"
+  else
+    got="$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)"
+  fi
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    say "checksum mismatch for $asset; refusing to install"
+    exit 1
+  fi
+  tar -xzf "$tmp/$asset" -C "$tmp" brojev
+  mkdir -p "$DIR"
+  chmod +x "$tmp/brojev"
+  mv -f "$tmp/brojev" "$BIN"
+  rm -f "$MARK"
+  installed=1
+  say "installed release v$VER ($os/$arch)"
+elif [ -x "$BIN" ]; then
+  touch "$MARK" # keep the source build; retry the release later
+elif command -v go >/dev/null 2>&1; then
+  say "no release binary for v$VER $os/$arch; building from source"
+  mkdir -p "$DIR"
+  build "$tmp/brojev" "$VER"
+  mv -f "$tmp/brojev" "$BIN"
+  touch "$MARK"
+  installed=1
+else
+  say "no release binary for v$VER $os/$arch and Go is not installed (https://go.dev/dl)"
+  exit 1
+fi
+
+if [ -n "$installed" ]; then
+  # Drop other versions; uninstalling the plugin removes the data dir itself.
+  for d in "$BINDIR"/*/; do
+    [ -d "$d" ] && [ "${d%/}" != "$DIR" ] && rm -rf "$d"
+  done
+  # Binaries from launchers before 0.2.0 lived in ~/.brojev/bin/<version>.
+  if [ "$BINDIR" != "$HOME_DIR/bin" ]; then
+    for d in "$HOME_DIR"/bin/[0-9]*/; do
+      [ -d "$d" ] && rm -rf "$d"
+    done
+  fi
+fi
+cleanup
+trap - EXIT INT TERM
+done_with "$BIN"

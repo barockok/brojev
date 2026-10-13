@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "BROJEV_PLUGIN_DATA=\"${CLAUDE_PLUGIN_DATA}\" \"${CLAUDE_PLUGIN_ROOT}/scripts/install\"",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}
