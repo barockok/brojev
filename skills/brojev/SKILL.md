@@ -51,5 +51,6 @@ brojev drives a dedicated Chrome profile (`~/.brojev/profile`). Logins made ther
 ## Setup and troubleshooting
 
 - `brojev doctor` checks Chrome, the daemon, the connection and the API keys.
+- First-time setup, a missing key, or Chrome/daemon trouble: use the `setup` skill (`/brojev:setup`).
 - Keys: `OPENROUTER_API_KEY` covers `run` (Jev through OpenRouter, plus the helper that writes field text when `values` does not cover it); an optional `TYPESAFE_API_KEY` calls Jev directly; the `jev_provider` setting (`JEV_PROVIDER`: auto, openrouter, typesafe) picks the route, from the plugin settings (`/plugin`), the environment, or `~/.brojev/env`. If `run` reports a missing or rejected key, tell the user where to set it instead of retrying.
 - `BROJEV_HEADLESS=1` runs without a window. `BROJEV_ATTACH=1` connects through chrome://inspect remote debugging instead of a debug-port launch (avoids `navigator.webdriver=true`; Chrome asks to Allow once per daemon start).

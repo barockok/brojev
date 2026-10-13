@@ -15,6 +15,8 @@ claude plugin marketplace add barockok/brojev
 claude plugin install brojev@brojev
 ```
 
+Then start Claude Code and run `/brojev:setup`: it checks Chrome and the daemon, walks you through the API key and the Chrome profile choice, and runs a smoke test.
+
 At session start the plugin's hook downloads the release binary for your platform (macOS or Linux, arm64 or amd64) into the plugin data directory (`~/.claude/plugins/data/<plugin id>/bin/<version>/`), verifies its checksum, removes older versions, and links it to `~/.brojev/bin/brojev`. Without a matching release it builds from source if Go 1.25+ is installed, and swaps in the release binary once one is available. Uninstalling the plugin removes the data directory.
 
 ### API keys
