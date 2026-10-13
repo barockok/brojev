@@ -2,4 +2,4 @@
 // -ldflags "-X github.com/barockok/brojev/internal/version.Version=v0.1.0".
 package version
 
-var Version = "0.3.0-dev"
+var Version = "0.4.0-dev"
