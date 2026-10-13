@@ -6,7 +6,8 @@
       "env": {
         "BROJEV_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}",
         "TYPESAFE_API_KEY": "${user_config.typesafe_api_key}",
-        "OPENROUTER_API_KEY": "${user_config.openrouter_api_key}"
+        "OPENROUTER_API_KEY": "${user_config.openrouter_api_key}",
+        "JEV_PROVIDER": "${user_config.jev_provider}"
       }
     }
   }

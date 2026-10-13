@@ -24,7 +24,15 @@ At session start the plugin's hook downloads the release binary for your platfor
 claude plugin install brojev@brojev --config openrouter_api_key=...
 ```
 
-Optional: a `typesafe_api_key` ([console.typesafe.ai/keys](https://console.typesafe.ai/keys)) makes brojev call Jev at TypeSafe directly, which saves about 200 ms per step; the helper still uses OpenRouter.
+Optional: a `typesafe_api_key` ([console.typesafe.ai/keys](https://console.typesafe.ai/keys)) lets brojev call Jev at TypeSafe directly, which saves about 200 ms per step; the helper still uses OpenRouter. The `jev_provider` setting (`JEV_PROVIDER` outside Claude Code) picks the route:
+
+| `jev_provider` | Jev is called at | Needs |
+|---|---|---|
+| `auto` (default) | TypeSafe when a TypeSafe key is set, otherwise OpenRouter | either key |
+| `openrouter` | OpenRouter, even if a TypeSafe key is set | `openrouter_api_key` |
+| `typesafe` | TypeSafe | `typesafe_api_key` |
+
+Change it in `/plugin` (brojev, configure) or with `--config jev_provider=typesafe`; the next `run` uses it, and `brojev doctor` shows the active route.
 
 Outside Claude Code (the CLI, or if you prefer a file), keys can also come from the environment or `~/.brojev/env`; plugin settings win when both are set:
 
@@ -111,7 +119,7 @@ brojev profile add me --dir "~/Library/Application Support/Google/Chrome" --chro
 brojev profile use work [--quit]                 # switch; --quit closes the previous profile's Chrome
 ```
 
-Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `TYPESAFE_MODEL`, `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
+Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
 ## Tests
 

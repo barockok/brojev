@@ -609,10 +609,11 @@ func doctor() error {
 		}
 	}
 
-	if _, endpoint, name := jev.KeyFromEnv(); name == "" {
-		fmt.Println("  [warn] jev api key       OPENROUTER_API_KEY not in the environment or ~/.brojev/env (the plugin passes it from its settings; needed for run only)")
+	if err := jev.KeyError(); err != nil {
+		fmt.Printf("  [warn] %-18s %v, in the environment or ~/.brojev/env (the plugin passes it from its settings; needed for run only)\n", "jev api key", err)
 	} else {
-		fmt.Printf("  [ok  ] %-18s %s set (%s)\n", "jev api key", name, endpoint)
+		_, endpoint, name := jev.KeyFromEnv()
+		fmt.Printf("  [ok  ] %-18s %s set, provider %s (%s)\n", "jev api key", name, jev.Provider(), endpoint)
 	}
 	if failed {
 		return fmt.Errorf("some checks failed; logs in %s", daemon.Home())

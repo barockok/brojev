@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// keyNames are the API key variables brojev reads. The plugin passes them to
+// keyNames are the API key variables brojev reads, plus JEV_PROVIDER. The plugin passes them to
 // the MCP server from userConfig (OS keychain); the MCP server forwards them
 // to the long-lived daemon, which may predate this Claude session.
-var keyNames = []string{"TYPESAFE_API_KEY", "JEV_API_KEY", "OPENROUTER_API_KEY", "TEXT_MODEL_API_KEY"}
+var keyNames = []string{"TYPESAFE_API_KEY", "JEV_API_KEY", "OPENROUTER_API_KEY", "TEXT_MODEL_API_KEY", "JEV_PROVIDER"}
 
 // CleanKeyEnv unsets empty key variables and unexpanded "${...}" placeholders
 // (an unset userConfig value), so ~/.brojev/env can still provide them.
@@ -22,13 +22,18 @@ func CleanKeyEnv() {
 	}
 }
 
-// KeyEnv returns the key variables set in this process.
+// KeyEnv returns every key variable, "" when unset (JEV_PROVIDER "auto"),
+// so the daemon drops a key or setting this session no longer has.
 func KeyEnv() map[string]string {
 	out := map[string]string{}
 	for _, k := range keyNames {
+		out[k] = ""
 		if v := os.Getenv(k); v != "" && !strings.HasPrefix(v, "${") {
 			out[k] = v
 		}
+	}
+	if out["JEV_PROVIDER"] == "" {
+		out["JEV_PROVIDER"] = "auto"
 	}
 	return out
 }
@@ -38,11 +43,17 @@ func setKeys(raw json.RawMessage) (any, error) {
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, fmt.Errorf("keys: bad params: %w", err)
 	}
+	// A name sent empty is unset; a name not sent (older clients) is kept.
 	set := 0
 	for _, k := range keyNames {
-		if v := in[k]; v != "" && !strings.HasPrefix(v, "${") {
+		v, ok := in[k]
+		switch {
+		case !ok:
+		case v != "" && !strings.HasPrefix(v, "${"):
 			os.Setenv(k, v)
 			set++
+		default:
+			os.Unsetenv(k)
 		}
 	}
 	return map[string]int{"set": set}, nil

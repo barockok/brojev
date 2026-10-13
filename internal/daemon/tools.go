@@ -451,8 +451,10 @@ func (s *Server) run(ctx context.Context, b *browser.Browser, raw json.RawMessag
 		return nil, fmt.Errorf("run: bad params: %w", err)
 	}
 	s.mu.Lock()
-	if s.jev == nil {
-		LoadEnvFile()
+	LoadEnvFile()
+	// Rebuilt when the provider or key changes (forwarded by each MCP server).
+	if key, endpoint, _ := jev.KeyFromEnv(); s.jev == nil || s.jev.Key != key || s.jev.Endpoint != endpoint {
+		s.llm = nil
 		j, err := jev.FromEnv()
 		if err != nil {
 			s.mu.Unlock()

@@ -26,8 +26,15 @@
     "typesafe_api_key": {
       "type": "string",
       "title": "TypeSafe API key (optional)",
-      "description": "Calls Jev at TypeSafe directly instead of through OpenRouter, about 200 ms faster per step. Create one at https://console.typesafe.ai/keys. Leave empty to use OpenRouter.",
+      "description": "Calls Jev at TypeSafe directly instead of through OpenRouter, about 200 ms faster per step (with provider auto or typesafe). Create one at https://console.typesafe.ai/keys. Leave empty to use OpenRouter.",
       "sensitive": true
+    },
+    "jev_provider": {
+      "type": "string",
+      "title": "Jev provider",
+      "description": "Where the run tool calls Jev: auto (default: TypeSafe when its key is set, otherwise OpenRouter), openrouter, or typesafe.",
+      "default": "auto",
+      "sensitive": false
     }
   }
 }

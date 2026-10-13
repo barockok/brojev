@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -30,18 +31,32 @@ type Client struct {
 	HTTP     *http.Client
 }
 
-// KeyFromEnv picks the key and endpoint. TYPESAFE_API_KEY (or JEV_API_KEY)
-// calls TypeSafe directly; otherwise OPENROUTER_API_KEY calls Jev through
-// OpenRouter, which serves the same API at the same token price (about 200 ms
-// more per request). JEV_ENDPOINT overrides the URL. name is the variable used.
+// Provider is JEV_PROVIDER: "typesafe", "openrouter", or "auto" (the
+// default: TypeSafe when its key is set, otherwise OpenRouter).
+func Provider() string {
+	p := strings.ToLower(strings.TrimSpace(os.Getenv("JEV_PROVIDER")))
+	if p == "" || strings.HasPrefix(p, "${") {
+		return "auto"
+	}
+	return p
+}
+
+// KeyFromEnv picks the key and endpoint for Provider. TypeSafe uses
+// TYPESAFE_API_KEY (or JEV_API_KEY) at api.typesafe.ai; OpenRouter uses
+// OPENROUTER_API_KEY and serves the same API at the same token price (about
+// 200 ms more per request). JEV_ENDPOINT overrides the URL. name is the key
+// variable used; all empty when the provider has no key or is unknown.
 func KeyFromEnv() (key, endpoint, name string) {
-	for _, n := range []string{"TYPESAFE_API_KEY", "JEV_API_KEY"} {
-		if v := os.Getenv(n); v != "" {
-			key, endpoint, name = v, DefaultEndpoint, n
-			break
+	p := Provider()
+	if p == "auto" || p == "typesafe" {
+		for _, n := range []string{"TYPESAFE_API_KEY", "JEV_API_KEY"} {
+			if v := os.Getenv(n); v != "" {
+				key, endpoint, name = v, DefaultEndpoint, n
+				break
+			}
 		}
 	}
-	if key == "" {
+	if key == "" && (p == "auto" || p == "openrouter") {
 		if v := os.Getenv("OPENROUTER_API_KEY"); v != "" {
 			key, endpoint, name = v, OpenRouterEndpoint, "OPENROUTER_API_KEY"
 		}
@@ -52,12 +67,29 @@ func KeyFromEnv() (key, endpoint, name string) {
 	return key, endpoint, name
 }
 
+// KeyError explains why KeyFromEnv found no key; nil when it did.
+func KeyError() error {
+	if key, _, _ := KeyFromEnv(); key != "" {
+		return nil
+	}
+	switch p := Provider(); p {
+	case "typesafe":
+		return errors.New("jev: JEV_PROVIDER=typesafe but TYPESAFE_API_KEY is not set")
+	case "openrouter":
+		return errors.New("jev: JEV_PROVIDER=openrouter but OPENROUTER_API_KEY is not set")
+	case "auto":
+		return errors.New("jev: no API key: set OPENROUTER_API_KEY (or TYPESAFE_API_KEY to call TypeSafe directly)")
+	default:
+		return fmt.Errorf("jev: JEV_PROVIDER=%q: use auto, typesafe or openrouter", p)
+	}
+}
+
 // FromEnv builds a client from KeyFromEnv and TYPESAFE_MODEL.
 func FromEnv() (*Client, error) {
-	key, endpoint, _ := KeyFromEnv()
-	if key == "" {
-		return nil, errors.New("jev: no API key: set OPENROUTER_API_KEY (or TYPESAFE_API_KEY to call TypeSafe directly)")
+	if err := KeyError(); err != nil {
+		return nil, err
 	}
+	key, endpoint, _ := KeyFromEnv()
 	model := os.Getenv("TYPESAFE_MODEL")
 	if model == "" {
 		model = "jev-latest"
