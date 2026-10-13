@@ -32,7 +32,7 @@ Optional: a `typesafe_api_key` ([console.typesafe.ai/keys](https://console.types
 | `openrouter` | OpenRouter, even if a TypeSafe key is set | `openrouter_api_key` |
 | `typesafe` | TypeSafe | `typesafe_api_key` |
 
-Change it in `/plugin` (brojev, configure) or with `--config jev_provider=typesafe`; the next `run` uses it, and `brojev doctor` shows the active route.
+Change it in the plugin settings (`/plugin`), or set it at install with `--config jev_provider=typesafe`; the next `run` uses it, and `brojev doctor` shows the active route.
 
 Outside Claude Code (the CLI, or if you prefer a file), keys can also come from the environment or `~/.brojev/env`; plugin settings win when both are set:
 
