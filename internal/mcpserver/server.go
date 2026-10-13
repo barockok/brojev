@@ -40,6 +40,15 @@ func call(ctx context.Context, method string, params any) (json.RawMessage, erro
 	if err := daemon.Ensure(ctx); err != nil {
 		return nil, err
 	}
+	if method == "run" {
+		// The daemon may predate this session: hand it the keys Claude Code
+		// passed us (plugin userConfig), which win over ~/.brojev/env.
+		if keys := daemon.KeyEnv(); len(keys) > 0 {
+			if err := daemon.Call(ctx, "keys", keys, nil); err != nil {
+				return nil, err
+			}
+		}
+	}
 	var out json.RawMessage
 	err := daemon.Call(ctx, method, params, &out)
 	return out, err

@@ -215,6 +215,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		return map[string]any{"pid": os.Getpid(), "uptimeSec": int(time.Since(s.started).Seconds()), "version": version.Version}, nil
 	case "profile":
 		return s.profileTool(ctx, req.Params)
+	case "keys":
+		return setKeys(req.Params)
 	case "shutdown":
 		s.quitOnce.Do(func() { close(s.quit) })
 		return map[string]bool{"ok": true}, nil

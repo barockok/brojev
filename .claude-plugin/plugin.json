@@ -3,7 +3,29 @@
   "displayName": "brojev (browser jev)",
   "description": "Fast browser agent for Claude Code: a Jev-driven run tool that completes browser sub-tasks in seconds, plus full Playwright-level primitives (snapshot, click, type, iframes, shadow DOM, dialogs, uploads, drag, tabs, emulation) on a dedicated Chrome profile. No Playwright, no extension.",
   "version": "0.1.0",
-  "author": { "name": "Zidni Mubarok" },
+  "author": {
+    "name": "Zidni Mubarok"
+  },
   "license": "MIT",
-  "keywords": ["browser", "automation", "jev", "cdp", "chrome"]
+  "keywords": [
+    "browser",
+    "automation",
+    "jev",
+    "cdp",
+    "chrome"
+  ],
+  "userConfig": {
+    "typesafe_api_key": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "Used by the run tool (Jev). Create one at https://console.typesafe.ai/keys. Leave empty to use only the primitive tools or to keep the key in ~/.brojev/env.",
+      "sensitive": true
+    },
+    "openrouter_api_key": {
+      "type": "string",
+      "title": "OpenRouter API key (optional)",
+      "description": "Optional helper model that writes form text you did not pass in values. Leave empty to skip.",
+      "sensitive": true
+    }
+  }
 }

@@ -58,6 +58,7 @@ func main() {
 	case "run":
 		err = runGoal(args)
 	case "mcp":
+		daemon.CleanKeyEnv() // unset userConfig values arrive as "${...}"
 		daemon.LoadEnvFile()
 		err = mcpserver.Run(context.Background())
 	case "bench":
@@ -520,6 +521,7 @@ func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func runDaemon(args []string) error {
+	daemon.CleanKeyEnv()
 	daemon.LoadEnvFile() // before flags: BROJEV_HEADLESS may come from the env file
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	headless := fs.Bool("headless", os.Getenv("BROJEV_HEADLESS") == "1", "run Chrome headless")
@@ -611,7 +613,7 @@ func doctor() error {
 		key = "JEV_API_KEY"
 	}
 	if os.Getenv(key) == "" {
-		fmt.Println("  [warn] jev api key       TYPESAFE_API_KEY not set (needed for run; primitives work without it)")
+		fmt.Println("  [warn] jev api key       TYPESAFE_API_KEY not in the environment or ~/.brojev/env (the plugin passes it from its settings; needed for run only)")
 	} else {
 		fmt.Printf("  [ok  ] %-18s %s set\n", "jev api key", key)
 	}
