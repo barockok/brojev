@@ -2,7 +2,7 @@
   "name": "brojev",
   "displayName": "brojev (browser jev)",
   "description": "Fast browser agent for Claude Code: a Jev-driven run tool that completes browser sub-tasks in seconds, plus full Playwright-level primitives (snapshot, click, type, iframes, shadow DOM, dialogs, uploads, drag, tabs, emulation) on a dedicated Chrome profile. No Playwright, no extension.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Zidni Mubarok"
   },
