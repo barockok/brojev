@@ -16,18 +16,32 @@ claude plugin install brojev@brojev
 
 At session start the plugin's hook downloads the release binary for your platform (macOS or Linux, arm64 or amd64) into the plugin data directory (`~/.claude/plugins/data/<plugin id>/bin/<version>/`), verifies its checksum, removes older versions, and links it to `~/.brojev/bin/brojev`. Without a matching release it builds from source if Go 1.25+ is installed, and swaps in the release binary once one is available. Uninstalling the plugin removes the data directory.
 
-Keys go in the environment or in `~/.brojev/env`:
+### API keys
+
+Claude Code asks for the plugin's settings on install: `typesafe_api_key` and the optional `openrouter_api_key` (a helper model that writes form text you did not pass in `values`). Both are marked sensitive, so Claude Code keeps them in your OS keychain and hands them to the brojev MCP server. To set them from the shell instead:
 
 ```sh
-mkdir -p ~/.brojev && cat > ~/.brojev/env <<'EOF'
-TYPESAFE_API_KEY=...
-OPENROUTER_API_KEY=...   # optional: helper that writes field text not covered by `values`
-EOF
-chmod 600 ~/.brojev/env
+claude plugin install brojev@brojev --config typesafe_api_key=...
+```
 
+Outside Claude Code (the CLI, or if you prefer a file), keys can also come from the environment or `~/.brojev/env`; plugin settings win when both are set:
+
+```sh
+mkdir -p ~/.brojev && printf 'TYPESAFE_API_KEY=...\n' > ~/.brojev/env && chmod 600 ~/.brojev/env
 export PATH="$HOME/.brojev/bin:$PATH"   # optional: the brojev CLI
 brojev doctor                           # checks Chrome, daemon, connection, keys
 ```
+
+### Updating
+
+Claude Code turns auto-update off by default for third-party marketplaces, so new brojev releases arrive only when you ask:
+
+```sh
+claude plugin marketplace update brojev
+claude plugin update brojev@brojev
+```
+
+Or turn on auto-update for the `brojev` marketplace in `/plugin` (Marketplaces). Each release is a new plugin version pinned to its git tag; the next session start installs the matching binary, removes the old one, and replaces a running brojev daemon from the previous version (Chrome keeps running; an attached personal Chrome asks for "Allow" once more).
 
 In Claude Code the tools appear as `mcp__plugin_brojev_brojev__run`, `..._snapshot`, and so on, and the `brojev` skill explains when to use which.
 
@@ -42,7 +56,11 @@ go test ./...                # unit tests
 BROJEV_E2E=1 go test ./internal/page/ ./internal/mcpserver/   # against real headless Chrome
 ```
 
-Releases: bump `version` in `.claude-plugin/plugin.json`, then push a matching tag (`v0.1.0`). GitHub Actions builds the binaries with GoReleaser and publishes them with `checksums.txt`.
+Releases:
+
+1. Set the new version in `.claude-plugin/plugin.json` and the matching `ref` (`v<version>`) in `.claude-plugin/marketplace.json`; `scripts/check-version.sh` verifies they agree (CI runs it too).
+2. Commit, tag `v<version>`, and push the commit and the tag together.
+3. The release workflow checks the tag against both files, runs the tests, and publishes the binaries with `checksums.txt` through GoReleaser. Users get the update via the marketplace (see Updating).
 
 ## Data and privacy
 

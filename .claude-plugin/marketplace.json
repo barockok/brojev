@@ -12,7 +12,16 @@
         "repo": "barockok/brojev",
         "ref": "v0.1.0"
       },
-      "description": "Fast Jev-driven browser agent with Playwright-level primitives"
+      "description": "Fast Jev-driven browser agent with Playwright-level primitives",
+      "category": "automation",
+      "tags": [
+        "browser",
+        "automation",
+        "chrome",
+        "cdp",
+        "jev",
+        "mcp"
+      ]
     }
   ]
 }
