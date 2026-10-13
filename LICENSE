@@ -25,4 +25,4 @@ browser-use/jev-ultrafast, Copyright (c) 2026 Browser Use, licensed under the
 MIT License (same terms as above).
 
 Portions (internal/keyboard) are derived from Playwright, Copyright Microsoft
-Corporation, licensed under the Apache License 2.0.
+Corporation, licensed under the Apache License 2.0; see THIRD_PARTY_LICENSES.
