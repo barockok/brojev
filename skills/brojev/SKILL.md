@@ -21,6 +21,7 @@ brojev drives a dedicated Chrome profile (`~/.brojev/profile`). Logins made ther
    - The page is canvas, a map, a chart or a game: `screenshot`, then `click` with x/y.
    - You need to read or compare data across the page (prices, tables, counts): `snapshot` and reason yourself. Jev must not be trusted with numbers, dates arithmetic, or "cheapest" style comparisons.
    - A step is irreversible (pay, send, delete, publish): do it yourself with `click` after checking the snapshot, or confirm with the user first.
+6. When you already know several steps from one snapshot (fill a form, set filters, then submit), send them in one `batch` call instead of one primitive per turn: `steps: [{tool, args}, ...]` with the same args as the single tools. It runs them in order without snapshots in between, stops at the first failure (the reply says which step and how many did not run), and returns one final snapshot. Refs stay valid until their element leaves the page, so after a step that navigates, end the batch (or `wait` for text) and take the next refs from the returned snapshot. Keep irreversible steps out of a batch unless the user approved them.
 
 ## Reading snapshots
 

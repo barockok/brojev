@@ -3,6 +3,7 @@
 A fast browser agent for Claude Code. One Go binary, its own Chrome DevTools Protocol engine, no Playwright, no browser extension.
 
 - **`run`**: hand over a whole browser sub-task. [TypeSafe's Jev](https://docs.typesafe.ai) (through OpenRouter) picks each action (operation and target in one request, about 300 to 550 ms through OpenRouter), brojev executes it with real input events, and the task usually finishes in 1 to 10 seconds for a fraction of a cent.
+- **`batch`**: several primitive steps you already know (fill a form, set filters, submit) in one call: no snapshot between steps, stops at the first failure, one snapshot at the end. Fewer agent turns than one primitive per call.
 - **Primitives**: snapshot, click, type, select, key, hover, scroll, drag, upload, dialog, tabs, history, wait, screenshot, eval, emulate, state, downloads. Use them when `run` hands back, or for exact control. They cover what Playwright covers: iframes (including cross-site, out-of-process ones), open shadow DOM, JS dialogs, file choosers, downloads, popups, HTML5 and pointer drag, nested scrolling, macOS editing shortcuts, device emulation, cookies and storage.
 
 ## Install

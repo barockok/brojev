@@ -297,6 +297,10 @@ func register(s *mcp.Server) {
 		"Returns status (done, blocked, needs_claude, budget, error), the steps taken, and the final page snapshot. " +
 		"Give a concrete goal and any values you already know. On needs_claude/blocked, continue with the primitive tools.",
 	}, runTool)
+	mcp.AddTool(s, &mcp.Tool{Name: "batch", Description: "Run several primitive actions in one call when you already know the steps, e.g. fill a form and submit: " +
+		"[{tool:'type',args:{ref:'e3',text:'Zurich'}},{tool:'click',args:{ref:'e7'}},{tool:'wait',args:{text:'Results'}}]. " +
+		"Args are those of the tool of the same name. No snapshot between steps (refs from the last snapshot stay valid while their elements exist); " +
+		"stops at the first failure and returns one line per step plus a final snapshot."}, batchTool)
 	mcp.AddTool(s, &mcp.Tool{Name: "snapshot", Description: "List the current page's actionable elements (refs like e12, f2e5 for iframes) and visible text. In-view elements first, then offscreen ones (they can still be used directly)."}, snapshotTool)
 	mcp.AddTool(s, &mcp.Tool{Name: "navigate", Description: "Load a URL in the current tab and return the new snapshot."}, action[NavigateIn]("navigate"))
 	mcp.AddTool(s, &mcp.Tool{Name: "click", Description: "Click an element by ref (scrolls into view, waits until stable, refuses if covered) or at viewport coordinates. Supports right/double/modifier clicks."}, action[ClickIn]("click"))

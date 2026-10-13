@@ -119,6 +119,40 @@ func TestMCPEndToEnd(t *testing.T) {
 	}
 	callText("profile", map[string]any{"action": "use", "name": "default", "quit": true})
 
+	// batch: several actions, one call, one final snapshot.
+	page2 := "data:text/html," + url.PathEscape(`<title>batch</title><input aria-label="First"><input aria-label="Last"><select aria-label="Size"><option>S</option><option>M</option></select><button onclick="setTimeout(()=>out.textContent='saved '+[...document.querySelectorAll('input,select')].map(e=>e.value).join(' '),300)">Save</button><p id=out></p>`)
+	snap = callText("navigate", map[string]any{"url": page2})
+	out := callText("batch", map[string]any{"steps": []any{
+		map[string]any{"tool": "type", "args": map[string]any{"ref": ref(snap, `"First"`), "text": "Ada"}},
+		map[string]any{"tool": "type", "args": map[string]any{"ref": ref(snap, `"Last"`), "text": "Lovelace"}},
+		map[string]any{"tool": "select", "args": map[string]any{"ref": ref(snap, `"Size"`), "values": []string{"M"}}},
+		map[string]any{"tool": "click", "args": map[string]any{"ref": ref(snap, `"Save"`)}},
+		map[string]any{"tool": "wait", "args": map[string]any{"text": "saved"}},
+		map[string]any{"tool": "eval", "args": map[string]any{"js": "out.textContent"}},
+	}})
+	if !strings.Contains(out, "6. eval") || !strings.Contains(out, "saved Ada Lovelace M") || strings.Count(out, `button "Save"`) != 1 {
+		t.Fatalf("batch:\n%s", out)
+	}
+	// A failing step stops the batch and is a tool error; later steps do not run.
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "batch", Arguments: map[string]any{"steps": []any{
+		map[string]any{"tool": "click", "args": map[string]any{"ref": "e9999"}},
+		map[string]any{"tool": "type", "args": map[string]any{"ref": ref(snap, `"First"`), "text": "never"}},
+	}}})
+	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "1 remaining step(s) not run") {
+		t.Fatalf("batch failure: %v %+v", err, res)
+	}
+	// Invalid steps are rejected before anything runs.
+	res, _ = cs.CallTool(ctx, &mcp.CallToolParams{Name: "batch", Arguments: map[string]any{"steps": []any{
+		map[string]any{"tool": "type", "args": map[string]any{"ref": ref(snap, `"First"`), "text": "never"}},
+		map[string]any{"tool": "teleport"},
+	}}})
+	if !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "nothing was executed") {
+		t.Fatalf("batch validation: %+v", res)
+	}
+	if v := callText("eval", map[string]any{"js": "document.querySelector('input').value"}); strings.Contains(v, "never") {
+		t.Fatalf("a rejected batch typed: %s", v)
+	}
+
 	// Errors come back as tool errors, not protocol failures.
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "click", Arguments: map[string]any{"ref": "e9999"}})
 	if err != nil || !res.IsError {
