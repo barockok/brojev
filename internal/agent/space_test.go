@@ -63,3 +63,39 @@ func TestLooksUnrendered(t *testing.T) {
 		t.Fatal("a populated page is rendered")
 	}
 }
+
+func TestGoalKeys(t *testing.T) {
+	for goal, want := range map[string][]string{
+		"Press the letter A key in the input field.": {"A"},
+		"hit F5 then press PageDown":                 {"F5", "PageDown"},
+		"Click the button":                           nil,
+	} {
+		got := goalKeys(goal)
+		if len(got) != len(want) {
+			t.Fatalf("%q -> %v, want %v", goal, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%q -> %v, want %v", goal, got, want)
+			}
+		}
+	}
+}
+
+func TestQuoted(t *testing.T) {
+	if got := quoted(`Add 'buy milk' and "write code" about Gödel's theorems`); len(got) != 2 || got[0] != "buy milk" || got[1] != "write code" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestPromptDialogOffersValues(t *testing.T) {
+	s := &page.Snapshot{Dialog: &page.Dialog{Type: "prompt", Message: "enter"}}
+	sp := buildSpace(s, Task{Goal: "answer the prompt", Values: map[string]string{"text": "hi"}}, false, maxOptions)
+	if sp.heads["DIALOG_PROMPT"] == nil || len(sp.heads["DIALOG_PROMPT"].options) != 1 {
+		t.Fatalf("heads: %v ops: %v", sp.heads, sp.ops)
+	}
+	alert := buildSpace(&page.Snapshot{Dialog: &page.Dialog{Type: "alert"}}, Task{Goal: "x", Values: map[string]string{"t": "v"}}, false, maxOptions)
+	if alert.heads["DIALOG_PROMPT"] != nil {
+		t.Fatal("prompt text offered for a non-prompt dialog")
+	}
+}

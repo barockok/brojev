@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/page"
@@ -45,7 +46,7 @@ const maxOffscreen = 60
 const maxOptions = 240
 
 var textTypes = map[string]bool{"": true, "text": true, "search": true, "email": true, "tel": true, "url": true,
-	"password": true, "number": true, "date": true, "time": true, "datetime-local": true, "month": true, "week": true}
+	"password": true, "number": true, "range": true, "date": true, "time": true, "datetime-local": true, "month": true, "week": true}
 
 var uploadName = regexp.MustCompile(`(?i)upload|attach|choose file|browse|add file|select file|drop file`)
 
@@ -89,6 +90,24 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 	if s.Dialog != nil {
 		sp.ops["DIALOG_ACCEPT"] = fmt.Sprintf("Accept the open %s dialog (OK)", s.Dialog.Type)
 		sp.ops["DIALOG_DISMISS"] = fmt.Sprintf("Dismiss the open %s dialog (Cancel)", s.Dialog.Type)
+		if s.Dialog.Type == "prompt" {
+			// Type into the prompt and accept; text comes from provided values
+			// or quoted strings in the goal, never invented.
+			h := &head{qid: "prompt_text", options: map[string]option{}, criteria: map[string]any{}, rules: rulePrompt}
+			for _, k := range sp.keys {
+				h.options["v:"+k] = option{value: t.Values[k], label: k}
+				h.criteria["v:"+k] = map[string]any{"value_name": k, "value": t.Values[k]}
+			}
+			for i, q := range quoted(t.Goal) {
+				k := fmt.Sprintf("q:%d", i+1)
+				h.options[k] = option{value: q, label: q}
+				h.criteria[k] = map[string]any{"value": q, "source": "quoted in the goal"}
+			}
+			if len(h.options) > 0 {
+				sp.heads["DIALOG_PROMPT"] = h
+				sp.ops["DIALOG_PROMPT"] = "Type the chosen text into the open prompt dialog and accept it (OK)"
+			}
+		}
 		sp.ops["BLOCKED"] = "Nothing can make progress"
 		return sp
 	}
@@ -220,6 +239,12 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 	}
 	add("CLICK", click, "Click an element (buttons, links, options, checkboxes, date cells, fields to open them)")
 	add("TYPE_TEXT", typ, "Replace a text field's content with a value")
+	if len(typ.options) > 0 {
+		// Same choices, but press Enter afterwards: search boxes, todo lists,
+		// chat and filter inputs that submit on Enter.
+		ts := &head{qid: "type_submit_target", options: typ.options, criteria: typ.criteria, rules: ruleTypeSubmit}
+		add("TYPE_SUBMIT", ts, "Replace a text field's content with a value, then press Enter to submit it (search boxes, add-item inputs)")
+	}
 	add("SELECT", sel, "Choose an option in a native dropdown")
 	add("HOVER", hover, "Move the mouse over an element to reveal a hover menu or tooltip")
 	add("UPLOAD", up, "Attach the provided file(s) to a file field or upload button")
@@ -239,6 +264,12 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 	} {
 		keys.options[k] = option{key: k}
 		keys.criteria[k] = d
+	}
+	for _, k := range goalKeys(t.Goal) {
+		if _, ok := keys.options[k]; !ok {
+			keys.options[k] = option{key: k}
+			keys.criteria[k] = "Press " + k + " (named in the goal)"
+		}
 	}
 	add("PRESS_KEY", keys, "Press one keyboard key on the focused element")
 
@@ -403,4 +434,53 @@ const ruleSelect = `Choose the field and option the goal requires. Options alrea
 const ruleUpload = `Choose the file field or upload button that the files belong to.`
 const ruleDragFrom = `Choose the element to pick up and drag.`
 const ruleDragTo = `Choose the element to drop the dragged element onto. It must differ from the dragged element.`
+const rulePrompt = `Choose the text to type into the prompt dialog. Never invent text.`
+const ruleTypeSubmit = `Same choices as typing, but Enter is pressed afterwards. Choose it when the goal needs the entry submitted (add an item, search, send).
+Do not choose a field that already contains the requested value.`
 const ruleKey = `Choose the key that advances the goal for the currently focused element.`
+
+var quotedRe = regexp.MustCompile(`['"\x{2018}\x{201C}]([^'"\x{2019}\x{201D}]{1,200})['"\x{2019}\x{201D}]`)
+
+// quoted returns quoted substrings of the goal in order, minus apostrophes
+// inside words ("Gödel's theorems" is not a quote).
+func quoted(goal string) []string {
+	var out []string
+	for _, m := range quotedRe.FindAllStringSubmatchIndex(goal, -1) {
+		if m[0] > 0 && unicode.IsLetter(rune(goal[m[0]-1])) {
+			continue
+		}
+		out = append(out, goal[m[2]:m[3]])
+	}
+	return out
+}
+
+var namedKeys = map[string]string{"enter": "Enter", "return": "Enter", "escape": "Escape", "esc": "Escape", "tab": "Tab",
+	"home": "Home", "end": "End", "pageup": "PageUp", "pagedown": "PageDown", "delete": "Delete", "space": "Space",
+	"backspace": "Backspace", "arrowleft": "ArrowLeft", "arrowright": "ArrowRight", "arrowup": "ArrowUp", "arrowdown": "ArrowDown"}
+var letterKeyRe = regexp.MustCompile(`(?i)\b(?:letter|key|digit|number|character)\s+['"]?([a-z0-9])['"]?(?:\s|$|[.,;:!?'"])`)
+var fnKeyRe = regexp.MustCompile(`(?i)\bF([1-9]|1[0-2])\b`)
+
+// goalKeys finds keys the goal asks for that the fixed key menu lacks:
+// "press the letter A", "hit F5", "press PageDown".
+func goalKeys(goal string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(k string) {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	for _, m := range letterKeyRe.FindAllStringSubmatch(goal, -1) {
+		add(m[1])
+	}
+	for _, m := range fnKeyRe.FindAllString(goal, -1) {
+		add(strings.ToUpper(m))
+	}
+	for _, w := range strings.FieldsFunc(strings.ToLower(goal), func(r rune) bool { return !unicode.IsLetter(r) }) {
+		if k, ok := namedKeys[w]; ok {
+			add(k)
+		}
+	}
+	return out
+}

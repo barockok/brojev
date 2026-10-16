@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -122,6 +123,10 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		return nil, err
 	}
 	if t.URL != "" {
+		if p.OpenDialog() != nil {
+			// A dialog left open by an earlier run would block navigation.
+			_, _ = p.HandleDialog(ctx, false, "")
+		}
 		ns := time.Now()
 		if _, err := p.Navigate(ctx, t.URL); err != nil {
 			return finish(p, "error", err.Error())
@@ -133,7 +138,9 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 	var history []hist
 	var lastFP uint64
 	executed, decisions, lowConf, failures := 0, 0, 0, 0
-	settledFirst, retriedBlocked := t.URL != "", false
+	settledFirst := t.URL != ""
+	blockedAt := map[uint64]bool{}
+	loadingWaited := time.Duration(0)
 	limit := maxOptions
 	typed := map[string]bool{}
 
@@ -166,6 +173,15 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		}
 		if decisions >= t.MaxSteps*2 {
 			return finish(p, "budget", "decision limit reached")
+		}
+
+		// A visible "loading" state after an action: wait it out instead of
+		// asking Jev to guess (it tends to click around meanwhile).
+		if n := len(history); n > 0 && loadingWaited < 20*time.Second && loadingText(snap.Text) {
+			ws := time.Now()
+			waitLoadingGone(ctx, p, 8*time.Second)
+			loadingWaited += time.Since(ws)
+			continue
 		}
 
 		// Unambiguous field/value pairs need no model call.
@@ -269,10 +285,10 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			}
 			return finish(p, "done", "")
 		}
-		if op == "BLOCKED" && !retriedBlocked && executed == 0 {
-			// Often a half-rendered page, not a real wall: give it one settle
-			// and re-decide when the page moved. Costs ~300 ms when it did not.
-			retriedBlocked = true
+		if op == "BLOCKED" && !blockedAt[fp] {
+			// Often a half-rendered page, not a real wall: give each page state
+			// one settle and re-decide when it moved. ~300 ms when it did not.
+			blockedAt[fp] = true
 			settle(ctx, p, settleBudget)
 			if again, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen}); err == nil && fingerprint(again) != fp {
 				continue
@@ -304,6 +320,11 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		case "BACK":
 			res, actErr = p.History(ctx, -1)
 			h.Action = "back"
+		case "DIALOG_PROMPT":
+			o := sp.heads[op].options[target]
+			step.Target, step.Text = o.label, o.value
+			_, actErr = p.HandleDialog(ctx, true, o.value)
+			h.Action, h.Text = "answer prompt", o.value
 		case "DIALOG_ACCEPT", "DIALOG_DISMISS":
 			_, actErr = p.HandleDialog(ctx, op == "DIALOG_ACCEPT", "")
 			h.Action = strings.ToLower(op)
@@ -345,7 +366,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			case "UPLOAD":
 				res, actErr = p.Upload(ctx, o.ref, t.Files)
 				h.Text = strings.Join(t.Files, ", ")
-			case "TYPE_TEXT":
+			case "TYPE_TEXT", "TYPE_SUBMIT":
 				text := o.value
 				if o.generate {
 					hs := time.Now()
@@ -359,7 +380,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				}
 				if actErr == nil {
 					step.Text, h.Text = text, text
-					res, actErr = p.Type(ctx, o.ref, text, page.TypeOptions{})
+					res, actErr = p.Type(ctx, o.ref, text, page.TypeOptions{Submit: op == "TYPE_SUBMIT"})
 				}
 			}
 		}
@@ -395,6 +416,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			if id := newest(before, after); id != "" {
 				if np, err := r.Env.Switch(ctx, id); err == nil {
 					p = np
+					settle(ctx, p, settleBudget)
 					step.Note = strings.TrimSpace(step.Note + " switched to new tab")
 					h.PageChanged = true
 				}
@@ -450,6 +472,26 @@ func settle(ctx context.Context, p *page.Page, budget time.Duration) {
 		select {
 		case <-time.After(settlePoll):
 		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+var loadingRe = regexp.MustCompile(`(?i)\b(loading|please wait|wait for it|processing|in progress)\b`)
+
+func loadingText(text string) bool { return loadingRe.MatchString(text) }
+
+// waitLoadingGone polls until the page no longer shows loading text.
+func waitLoadingGone(ctx context.Context, p *page.Page, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		select {
+		case <-time.After(250 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
+		s, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 3000, MaxOffscreen: -1})
+		if err != nil || s.Dialog != nil || !loadingText(s.Text) {
 			return
 		}
 	}
