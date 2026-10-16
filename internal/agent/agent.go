@@ -336,7 +336,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			out.Steps = append(out.Steps, step)
 			r.emit(step)
 			if t.Expect != "" {
-				v := p.WaitText(ctx, t.Expect, false, 1500*time.Millisecond) == nil
+				v := p.WaitText(ctx, t.Expect, false, 5*time.Second) == nil
 				out.Verified = &v
 			}
 			if t.Answer && r.LLM != nil {
