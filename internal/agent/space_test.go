@@ -23,7 +23,7 @@ func manyElements(n int) *page.Snapshot {
 // 300+ elements must be trimmed, keeping goal-relevant ones even offscreen.
 func TestSpaceStaysUnderCriteriaLimit(t *testing.T) {
 	task := Task{Goal: "Fill the subject and click Send", Values: map[string]string{"subject": "hi", "to": "a@b.c", "body": "x"}}
-	sp := buildSpace(manyElements(400), task, true, maxOptions)
+	sp := buildSpace(manyElements(400), task, true, maxOptions, window{})
 	for op, h := range sp.heads {
 		if len(h.options) > 255 || len(h.criteria) > 255 {
 			t.Fatalf("%s head has %d options, %d criteria", op, len(h.options), len(h.criteria))
@@ -46,7 +46,7 @@ func TestSpaceStaysUnderCriteriaLimit(t *testing.T) {
 
 func TestSmallPagesKeepDomOrder(t *testing.T) {
 	s := manyElements(5)
-	sp := buildSpace(s, Task{Goal: "x"}, false, maxOptions)
+	sp := buildSpace(s, Task{Goal: "x"}, false, maxOptions, window{})
 	if len(sp.table) != len(s.Elements) || sp.table[0]["label"] != "[1] checkbox \"row 0\"" {
 		t.Fatalf("small page was reordered or trimmed: %v", sp.table[0])
 	}
@@ -90,12 +90,94 @@ func TestQuoted(t *testing.T) {
 
 func TestPromptDialogOffersValues(t *testing.T) {
 	s := &page.Snapshot{Dialog: &page.Dialog{Type: "prompt", Message: "enter"}}
-	sp := buildSpace(s, Task{Goal: "answer the prompt", Values: map[string]string{"text": "hi"}}, false, maxOptions)
+	sp := buildSpace(s, Task{Goal: "answer the prompt", Values: map[string]string{"text": "hi"}}, false, maxOptions, window{})
 	if sp.heads["DIALOG_PROMPT"] == nil || len(sp.heads["DIALOG_PROMPT"].options) != 1 {
 		t.Fatalf("heads: %v ops: %v", sp.heads, sp.ops)
 	}
-	alert := buildSpace(&page.Snapshot{Dialog: &page.Dialog{Type: "alert"}}, Task{Goal: "x", Values: map[string]string{"t": "v"}}, false, maxOptions)
+	alert := buildSpace(&page.Snapshot{Dialog: &page.Dialog{Type: "alert"}}, Task{Goal: "x", Values: map[string]string{"t": "v"}}, false, maxOptions, window{})
 	if alert.heads["DIALOG_PROMPT"] != nil {
 		t.Fatal("prompt text offered for a non-prompt dialog")
+	}
+}
+
+func bigPage() *page.Snapshot {
+	s := &page.Snapshot{URL: "https://mail.example/", Title: "Inbox", Viewport: [2]float64{1000, 800}, Scroll: [4]float64{0, 0, 0, 5000}}
+	for i := 0; i < 600; i++ {
+		name := fmt.Sprintf("item %d", i)
+		if i >= 586 && i <= 590 {
+			name = fmt.Sprintf("Archive thread %d", i) // e587..e591; e591 is the target
+		}
+		s.Elements = append(s.Elements, page.Element{Ref: fmt.Sprintf("e%d", i+1), Role: "button", Name: name, Tag: "button", InView: i < 100})
+	}
+	return s
+}
+
+func offers(sp *space, ref string) bool {
+	for _, o := range sp.heads["CLICK"].options {
+		if o.ref == ref {
+			return true
+		}
+	}
+	return false
+}
+
+// The target is far below the fold and shares no word with the goal: it is
+// not offered by default, but both FIND and MORE_OPTIONS reach it.
+func TestTailReachableByFindAndMore(t *testing.T) {
+	task := Task{Goal: "Open the old conversation"}
+	s := bigPage()
+
+	def := buildSpace(s, task, false, maxOptions, window{})
+	if offers(def, "e591") {
+		t.Fatal("target should be outside the default view")
+	}
+	if def.ops["FIND"] == "" || def.ops["MORE_OPTIONS"] == "" {
+		t.Fatalf("navigation ops missing: %v", def.ops)
+	}
+	phrase := ""
+	for _, o := range def.heads["FIND"].options {
+		if o.value == "archive" {
+			phrase = o.value
+		}
+	}
+	if phrase == "" {
+		t.Fatalf("FIND does not offer the recurring word of the hidden group: %v", def.heads["FIND"].criteria)
+	}
+
+	found := buildSpace(s, task, false, maxOptions, window{query: phrase})
+	if !offers(found, "e591") || len(found.heads["CLICK"].options) != 5 {
+		t.Fatalf("FIND view: %d options, target offered=%v", len(found.heads["CLICK"].options), offers(found, "e591"))
+	}
+	if found.ops["FIND"] != "" {
+		t.Fatal("FIND must not be offered inside a phrase view")
+	}
+
+	reached := false
+	for pg := 1; pg < def.view.pages; pg++ {
+		if offers(buildSpace(s, task, false, maxOptions, window{page: pg}), "e591") {
+			reached = true
+		}
+	}
+	if !reached {
+		t.Fatalf("no MORE_OPTIONS group contains the target (pages=%d)", def.view.pages)
+	}
+	last := buildSpace(s, task, false, maxOptions, window{page: def.view.pages - 1})
+	if last.ops["MORE_OPTIONS"] != "" {
+		t.Fatal("MORE_OPTIONS offered on the last group")
+	}
+	for pg := 0; pg < def.view.pages; pg++ {
+		sp := buildSpace(s, task, false, maxOptions, window{page: pg})
+		for op, h := range sp.heads {
+			if len(h.options) > 255 {
+				t.Fatalf("page %d %s has %d options", pg, op, len(h.options))
+			}
+		}
+	}
+}
+
+func TestSmallPageHasNoNavigationOps(t *testing.T) {
+	sp := buildSpace(manyElements(5), Task{Goal: "x"}, false, maxOptions, window{})
+	if sp.ops["FIND"] != "" || sp.ops["MORE_OPTIONS"] != "" {
+		t.Fatalf("ops: %v", sp.ops)
 	}
 }

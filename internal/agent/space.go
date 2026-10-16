@@ -36,6 +36,8 @@ type space struct {
 	ops      map[string]string // operation -> description
 	drop     *head             // DRAG destination head
 	canvasTo *head             // CANVAS_DRAG destination head
+	view     view
+	win      window
 	keys     []string          // provided value keys, in order
 	refs     map[string]string // index -> label (for messages)
 }
@@ -82,7 +84,7 @@ func label(i string, e page.Element) string {
 	return s
 }
 
-func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
+func buildSpace(s *page.Snapshot, t Task, helper bool, limit int, w window) *space {
 	sp := &space{heads: map[string]*head{}, ops: map[string]string{}, refs: map[string]string{}}
 	for k := range t.Values {
 		sp.keys = append(sp.keys, k)
@@ -114,22 +116,13 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 		return sp
 	}
 
-	// In-view elements first, then a bounded number below/above the fold:
-	// offscreen targets are scrolled into view automatically on use.
-	var els []page.Element
-	off := 0
-	for _, e := range s.Elements {
-		if e.InView {
-			els = append(els, e)
-		}
-	}
-	for _, e := range s.Elements {
-		if !e.InView && off < maxOffscreen {
-			els = append(els, e)
-			off++
-		}
-	}
-	els = rank(els, t, limit)
+	// What is offered: in-view elements first, then offscreen ones. Elements
+	// that do not fit stay reachable through FIND (narrow by phrase) and
+	// MORE_OPTIONS (next group); offscreen targets scroll into view on use.
+	v := pick(s.Elements, t, limit, w)
+	els := v.els
+	sp.view = v
+	sp.win = w
 
 	click := &head{qid: "click_target", options: map[string]option{}, criteria: map[string]any{}, rules: ruleClick}
 	hover := &head{qid: "hover_target", options: map[string]option{}, criteria: map[string]any{}, rules: ruleHover}
@@ -294,6 +287,18 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 		}
 	}
 
+	if len(v.hidden) > 0 || v.pages > 1 {
+		if w.query == "" && len(v.hidden) > 0 {
+			if crit, opts := findCandidates(t, v.hidden); len(opts) > 0 {
+				add("FIND", &head{qid: "find_phrase", options: opts, criteria: crit, rules: ruleFind},
+					fmt.Sprintf("Offer only the elements whose name contains a phrase: %d elements on the page are not currently offered", len(v.hidden)))
+			}
+		}
+		if v.page+1 < v.pages {
+			sp.ops["MORE_OPTIONS"] = fmt.Sprintf("Show the next group of offered elements (%d not offered now)", len(v.hidden))
+		}
+	}
+
 	keys := &head{qid: "key_choice", options: map[string]option{}, criteria: map[string]any{}, rules: ruleKey}
 	for k, d := range map[string]string{
 		"Enter": "Submit the focused field or activate the focused control", "Escape": "Close a popup, menu or overlay",
@@ -326,14 +331,22 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 	return sp
 }
 
-// rank trims els to limit, keeping the ones most likely to matter: elements
-// whose name shares a word with the goal or a provided value name come first,
-// then the remaining in-view ones, then offscreen. Pages within the limit are
-// returned untouched, in DOM order.
-func rank(els []page.Element, t Task, limit int) []page.Element {
-	if len(els) <= limit {
-		return els
-	}
+// window selects which slice of an oversized page is offered: a page number
+// (0 = the ranked default view) or a phrase the element names must contain.
+type window struct {
+	page  int
+	query string
+}
+
+// view is the outcome of pick: the offered elements, the rest, and paging.
+type view struct {
+	els    []page.Element // offered, in-view first
+	hidden []page.Element // not offered in this window
+	pages  int
+	page   int
+}
+
+func (t Task) goalWords() map[string]bool {
 	words := map[string]bool{}
 	add := func(s string) {
 		for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
@@ -348,35 +361,199 @@ func rank(els []page.Element, t Task, limit int) []page.Element {
 	for k := range t.Values {
 		add(k)
 	}
+	return words
+}
+
+func elText(e page.Element) string {
+	s := strings.ToLower(e.Name)
+	if e.Value != nil {
+		s += " " + strings.ToLower(*e.Value)
+	}
+	return s
+}
+
+// pick chooses what to offer. Default view (query empty, page 0): every
+// in-view element, every offscreen element whose name shares a word with the
+// goal or provided value names, and the first maxOffscreen other offscreen
+// ones, trimmed by relevance to limit. Later pages walk the remainder in DOM
+// order. With a query, only elements whose name or value contains it are
+// offered (paged the same way). Small pages come back whole.
+func pick(all []page.Element, t Task, limit int, w window) view {
+	words := t.goalWords()
+	matches := func(e page.Element) bool {
+		low := strings.ToLower(e.Name)
+		for k := range words {
+			if strings.Contains(low, k) {
+				return true
+			}
+		}
+		return false
+	}
 	score := func(e page.Element) int {
 		n := 0
 		if e.InView {
 			n += 2
 		}
-		low := strings.ToLower(e.Name)
-		for w := range words {
-			if strings.Contains(low, w) {
-				n += 4
-				break
-			}
+		if matches(e) {
+			n += 4
 		}
 		if len(t.Values) > 0 && editable(e) {
 			n++
 		}
 		return n
 	}
-	idx := make([]int, len(els))
-	for i := range idx {
-		idx[i] = i
+
+	var first, rest []int // indexes into all, DOM order
+	if w.query != "" {
+		q := strings.ToLower(w.query)
+		for i, e := range all {
+			if strings.Contains(elText(e), q) {
+				first = append(first, i)
+			}
+		}
+	} else {
+		off := 0
+		for i, e := range all {
+			switch {
+			case e.InView || matches(e):
+				first = append(first, i)
+			case off < maxOffscreen:
+				first = append(first, i)
+				off++
+			default:
+				rest = append(rest, i)
+			}
+		}
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return score(els[idx[a]]) > score(els[idx[b]]) })
-	keep := idx[:limit]
-	sort.Ints(keep) // back to DOM order so indices stay readable
-	out := make([]page.Element, 0, limit)
-	for _, i := range keep {
-		out = append(out, els[i])
+	if len(first) > limit {
+		order := append([]int(nil), first...)
+		sort.SliceStable(order, func(a, b int) bool { return score(all[order[a]]) > score(all[order[b]]) })
+		keep := map[int]bool{}
+		for _, i := range order[:limit] {
+			keep[i] = true
+		}
+		var kept, over []int
+		for _, i := range first {
+			if keep[i] {
+				kept = append(kept, i)
+			} else {
+				over = append(over, i)
+			}
+		}
+		first, rest = kept, append(over, rest...)
+		sort.Ints(rest)
 	}
-	return out
+
+	chunks := [][]int{first}
+	for i := 0; i < len(rest); i += limit {
+		chunks = append(chunks, rest[i:min(i+limit, len(rest))])
+	}
+	pg := min(max(w.page, 0), len(chunks)-1)
+	v := view{pages: len(chunks), page: pg}
+	shown := map[int]bool{}
+	for _, i := range chunks[pg] {
+		shown[i] = true
+	}
+	var inView, offscreen []page.Element
+	for i, e := range all {
+		switch {
+		case shown[i] && e.InView:
+			inView = append(inView, e)
+		case shown[i]:
+			offscreen = append(offscreen, e)
+		default:
+			v.hidden = append(v.hidden, e)
+		}
+	}
+	v.els = append(inView, offscreen...)
+	return v
+}
+
+// findCandidates proposes phrases for FIND: quoted goal text, provided
+// values and goal words that name at least one element not currently offered.
+func findCandidates(t Task, hidden []page.Element) (map[string]any, map[string]option) {
+	var cands []string
+	seen := map[string]bool{}
+	add := func(c string) {
+		c = strings.TrimSpace(c)
+		if len(c) >= 2 && len(c) <= 60 && !seen[strings.ToLower(c)] {
+			seen[strings.ToLower(c)] = true
+			cands = append(cands, c)
+		}
+	}
+	for _, q := range quoted(t.Goal) {
+		add(q)
+	}
+	keys := make([]string, 0, len(t.Values))
+	for k := range t.Values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		add(t.Values[k])
+		add(k)
+	}
+	gw := t.goalWords()
+	var ws []string
+	for w := range gw {
+		ws = append(ws, w)
+	}
+	sort.Strings(ws)
+	for _, w := range ws {
+		add(w)
+	}
+	// Words that recur in the names of elements not offered: groups Jev can
+	// name even when the goal does not (rare words first, they discriminate).
+	freq := map[string]int{}
+	for _, e := range hidden {
+		seenHere := map[string]bool{}
+		for _, w := range words(e.Name) {
+			if len(w) >= 3 && !stopWords[w] && !seenHere[w] {
+				seenHere[w] = true
+				freq[w]++
+			}
+		}
+	}
+	var hw []string
+	for w, n := range freq {
+		if n >= 2 && n <= len(hidden)/2 {
+			hw = append(hw, w)
+		}
+	}
+	sort.Slice(hw, func(i, j int) bool {
+		if freq[hw[i]] != freq[hw[j]] {
+			return freq[hw[i]] < freq[hw[j]]
+		}
+		return hw[i] < hw[j]
+	})
+	if len(hw) > 15 {
+		hw = hw[:15]
+	}
+	for _, w := range hw {
+		add(w)
+	}
+	crit := map[string]any{}
+	opts := map[string]option{}
+	for _, c := range cands {
+		low := strings.ToLower(c)
+		n := 0
+		var ex []string
+		for _, e := range hidden {
+			if strings.Contains(elText(e), low) {
+				n++
+				if len(ex) < 3 {
+					ex = append(ex, e.Name)
+				}
+			}
+		}
+		if n == 0 || len(opts) >= 30 {
+			continue
+		}
+		key := "q" + strconv.Itoa(len(opts)+1)
+		crit[key] = map[string]any{"phrase": c, "matching_elements_not_offered": n, "examples": ex}
+		opts[key] = option{value: c, label: c}
+	}
+	return crit, opts
 }
 
 var stopWords = map[string]bool{"the": true, "and": true, "then": true, "with": true, "from": true, "that": true,
@@ -461,6 +638,7 @@ If Search/Submit is visible and the required fields are ready, CLICK it immediat
 Offscreen elements can be used directly; they scroll into view automatically. SCROLL only to find content that is not listed.
 PRESS_KEY Enter submits a field when no submit button is offered; Escape closes popups.
 Sliders and number inputs are set with TYPE_TEXT using the number from the goal; arrow keys only work on a focused slider.
+If the element you need is not in the offered list but the page has more elements, use FIND with a phrase from the goal, or MORE_OPTIONS to see the next group.
 On drawing canvases, CANVAS_DRAG draws with the ACTIVE tool (the pressed toolbar button): CLICK the needed tool first, then drag.
 After each drawn item the tool may reset: re-select it before the next one. Never repeat an identical canvas action.
 HOVER only to reveal menus that open on hover. UPLOAD attaches the provided files.
@@ -485,6 +663,7 @@ const ruleDragTo = `Choose the element to drop the dragged element onto. It must
 const ruleCanvasClick = `Choose the canvas cell to click. Cells are a grid over the drawing surface; use the row/column and position names to place things where the goal says.`
 const ruleCanvasFrom = `Choose the canvas cell where the drag starts (for a shape: its first corner; for a line or arrow: its start). The active tool is whatever was last chosen in the toolbar.`
 const ruleCanvasTo = `Choose the canvas cell where the drag ends (a shape's opposite corner, a line's end). It must differ from the start cell and be far enough away to make a visible shape.`
+const ruleFind = `Choose the phrase most likely to appear in the name of the element the goal needs next. The examples show names that contain it.`
 const rulePrompt = `Choose the text to type into the prompt dialog. Never invent text.`
 const ruleTypeSubmit = `Same choices as typing, but Enter is pressed afterwards. Choose it when the goal needs the entry submitted (add an item, search, send).
 Do not choose a field that already contains the requested value.`

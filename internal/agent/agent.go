@@ -156,13 +156,14 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 	blockedAt := map[uint64]bool{}
 	loadingWaited := time.Duration(0)
 	limit := maxOptions
+	win, navMoves := window{}, 0
 	typed := map[string]bool{}
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return finish(p, "error", err.Error())
 		}
-		snap, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen})
+		snap, err := p.Snapshot(ctx, decideSnap)
 		if err != nil {
 			return finish(p, "error", "snapshot: "+err.Error())
 		}
@@ -263,11 +264,15 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			continue
 		}
 
-		sp := buildSpace(snap, t, r.LLM != nil, limit)
+		sp := buildSpace(snap, t, r.LLM != nil, limit, win)
 		state := map[string]any{
 			"page":           map[string]any{"url": snap.URL, "title": snap.Title, "text": snap.Text},
 			"elements":       sp.table,
 			"recent_actions": tail(history, 10),
+		}
+		if len(sp.view.hidden) > 0 || sp.view.pages > 1 {
+			state["options_window"] = map[string]any{"offered": len(sp.view.els), "not_offered": len(sp.view.hidden),
+				"group": sp.view.page + 1, "groups": sp.view.pages, "phrase_filter": win.query}
 		}
 		if tools := pressedTools(snap); len(tools) > 0 {
 			state["active_tool"] = tools
@@ -373,7 +378,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			// one settle and re-decide when it moved. ~300 ms when it did not.
 			blockedAt[fp] = true
 			settle(ctx, p, settleBudget)
-			if again, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen}); err == nil && fingerprint(again) != fp {
+			if again, err := p.Snapshot(ctx, decideSnap); err == nil && fingerprint(again) != fp {
 				continue
 			}
 		}
@@ -381,6 +386,27 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			out.Steps = append(out.Steps, step)
 			r.emit(step)
 			return finish(p, "blocked", "Jev found no supported action that makes progress")
+		}
+
+		if op == "FIND" || op == "MORE_OPTIONS" {
+			// Moves the option window; no browser action.
+			if navMoves >= 4 {
+				out.Steps = append(out.Steps, step)
+				return finish(p, "needs_claude", "searched the option lists 4 times without acting; the target may need a primitive action")
+			}
+			navMoves++
+			if op == "FIND" {
+				o := sp.heads[op].options[target]
+				win = window{query: o.value}
+				step.Target = o.value
+			} else {
+				win = window{page: win.page + 1, query: win.query}
+				step.Target = fmt.Sprintf("group %d", win.page+1)
+			}
+			out.Steps = append(out.Steps, step)
+			r.emit(step)
+			history = append(history, hist{Action: strings.ToLower(op) + " " + step.Target, Kind: op})
+			continue
 		}
 
 		// Execute.
@@ -537,6 +563,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		}
 		failures = 0
 		executed++
+		win, navMoves = window{}, 0
 		if res != nil && res.Dialog != nil {
 			step.Note = "opened " + res.Dialog.Type + " dialog"
 		}
@@ -557,6 +584,10 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		history = append(history, h)
 	}
 }
+
+// decideSnap is the snapshot every decision (and the checks comparing against
+// it) uses: offscreen elements beyond the offered ones stay findable.
+var decideSnap = page.SnapshotOptions{MaxText: 6000, MaxOffscreen: 300}
 
 const (
 	settleBudget = 5 * time.Second
@@ -611,7 +642,7 @@ func settle(ctx context.Context, p *page.Page, budget time.Duration) {
 func waitChange(ctx context.Context, p *page.Page, fp uint64, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		s, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen})
+		s, err := p.Snapshot(ctx, decideSnap)
 		if err != nil || s.Dialog != nil || fingerprint(s) != fp {
 			return
 		}
@@ -663,7 +694,7 @@ func stalled(h []hist) bool {
 	n := 0
 	for i := len(h) - 1; i >= 0 && n < 3; i-- {
 		// Canvas drawing changes pixels, not the DOM: it can never look "stalled".
-		if h[i].Kind == "WAIT" || h[i].Error != "" || strings.HasPrefix(h[i].Kind, "CANVAS") {
+		if h[i].Kind == "WAIT" || h[i].Kind == "FIND" || h[i].Kind == "MORE_OPTIONS" || h[i].Error != "" || strings.HasPrefix(h[i].Kind, "CANVAS") {
 			continue
 		}
 		if h[i].PageChanged {

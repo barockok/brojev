@@ -53,6 +53,18 @@ func TestMain(m *testing.M) {
 			fmt.Fprint(w, `<!doctype html><title>boot</title><p>Loading...</p><script>setTimeout(()=>{document.body.innerHTML=`+"`"+`<form onsubmit="event.preventDefault(); out.textContent='Welcome, '+n.value"><label>Name <input id=n name=n></label><button>Create account</button></form><p id=out></p>`+"`"+`},1200)</script>`)
 			return
 		}
+		if r.URL.Path == "/big" {
+			var b strings.Builder
+			b.WriteString("<!doctype html><title>big</title>")
+			for i := 0; i < 300; i++ {
+				fmt.Fprintf(&b, "<div><button>item %d</button></div>", i)
+			}
+			for i := 1; i <= 4; i++ {
+				fmt.Fprintf(&b, "<div><button onclick=\"document.title='archived %d'\">Archive thread %d</button></div>", i, i)
+			}
+			fmt.Fprint(w, b.String())
+			return
+		}
 		if r.URL.Path == "/popup" {
 			fmt.Fprint(w, `<!doctype html><title>help</title><p>help center</p>`)
 			return
@@ -309,5 +321,37 @@ func TestWaitsForSlowShell(t *testing.T) {
 	}
 	if first := (*seen)[0]; index(&first, "Create account") == "" {
 		t.Fatal("first decision was made on the unrendered shell")
+	}
+}
+
+// 304 buttons: the target is far below the fold and not in the default
+// option list; the loop must reach it through FIND, then click.
+func TestFindReachesHiddenElement(t *testing.T) {
+	e := newEnv(t)
+	j, seen := fakeJev(t, func(r *req) (string, string, float64) {
+		if strings.HasPrefix(r.State.Page.Title, "archived") {
+			return "DONE", "", 0.9
+		}
+		if q, ok := r.Questions["find_phrase"]; ok {
+			for k, c := range q.Criteria {
+				if m, ok := c.(map[string]any); ok && m["phrase"] == "archive" {
+					return "FIND", k, 0.9
+				}
+			}
+		}
+		return "CLICK", index(r, "Archive thread 3"), 0.9
+	})
+	out, err := (&Runner{Jev: j, Env: e}).Run(context.Background(), Task{Goal: "Open the old conversation", URL: base + "/big"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "done" || out.Title != "archived 3" {
+		t.Fatalf("outcome: %s %s title=%q steps=%+v", out.Status, out.Reason, out.Title, out.Steps)
+	}
+	if len(out.Steps) < 3 || out.Steps[0].Op != "FIND" || out.Steps[1].Op != "CLICK" {
+		t.Fatalf("steps: %+v", out.Steps)
+	}
+	if first := (*seen)[0]; index(&first, "Archive thread 3") != "" {
+		t.Fatal("target was offered in the default view")
 	}
 }
