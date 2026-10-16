@@ -265,7 +265,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 					continue // leave it to Jev; typed[] stops a retry loop
 				}
 				if isCombo(snap, f.el.Ref) {
-					waitSuggestions(ctx, p, optionCount(snap), 400*time.Millisecond)
+					waitSuggestions(ctx, p, optionSig(snap), 800*time.Millisecond)
 				}
 				executed++
 				out.Steps = append(out.Steps, st)
@@ -659,7 +659,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 					step.Text, h.Text = text, text
 					res, actErr = p.Type(ctx, o.ref, text, page.TypeOptions{Submit: op == "TYPE_SUBMIT"})
 					if actErr == nil && isCombo(snap, o.ref) {
-						waitSuggestions(ctx, p, optionCount(snap), 400*time.Millisecond)
+						waitSuggestions(ctx, p, optionSig(snap), 800*time.Millisecond)
 					}
 				}
 			}
@@ -779,21 +779,23 @@ func settle(ctx context.Context, p *page.Page, budget time.Duration) {
 	}
 }
 
-// optionCount counts visible suggestion rows (options, menu items, listboxes).
-func optionCount(s *page.Snapshot) int {
-	n := 0
+// optionSig is the visible suggestion rows (options, menu items, listboxes) as
+// one string: a changed signature means the suggestions were replaced or filled.
+func optionSig(s *page.Snapshot) string {
+	var b strings.Builder
 	for _, e := range s.Elements {
 		if e.InView && (e.Role == "option" || e.Role == "menuitem" || e.Role == "listbox") {
-			n++
+			b.WriteString(e.Role + ":" + e.Name + "|")
 		}
 	}
-	return n
+	return b.String()
 }
 
-// waitSuggestions gives an autocomplete a moment to show its suggestions after
-// typing, so the next decision sees them instead of an empty popup. It returns
-// early once more suggestion rows are visible than before.
-func waitSuggestions(ctx context.Context, p *page.Page, before int, budget time.Duration) {
+// waitSuggestions gives an autocomplete a moment to update its suggestions
+// after typing, so the next decision sees the ones for the typed text and not
+// the previous list. It returns as soon as the suggestion rows differ from
+// `before`, or after budget.
+func waitSuggestions(ctx context.Context, p *page.Page, before string, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		select {
@@ -802,7 +804,10 @@ func waitSuggestions(ctx context.Context, p *page.Page, before int, budget time.
 			return
 		}
 		s, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: -1, MaxOffscreen: 0})
-		if err != nil || s.Dialog != nil || optionCount(s) > before {
+		if err != nil || s.Dialog != nil {
+			return
+		}
+		if sig := optionSig(s); sig != before && sig != "" {
 			return
 		}
 	}
