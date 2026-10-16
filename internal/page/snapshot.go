@@ -26,7 +26,8 @@ type Element struct {
 	Rect    [4]float64 `json:"rect"`
 	InView  bool       `json:"inView"`
 	Frame   int        `json:"frame"`
-	Free    string     `json:"free,omitempty"` // canvas: 5x6 grid, "1" where a click reaches the canvas
+	Covered bool       `json:"covered,omitempty"` // something else is on top of its centre
+	Free    string     `json:"free,omitempty"`    // canvas: 5x6 grid, "1" where a click reaches the canvas
 }
 
 type Snapshot struct {
@@ -58,6 +59,7 @@ type rawSnap struct {
 		Rect    [4]float64 `json:"rect"`
 		InView  bool       `json:"inView"`
 		Free    string     `json:"free"`
+		Covered bool       `json:"covered"`
 	} `json:"elements"`
 	Text string `json:"text"`
 }
@@ -152,7 +154,7 @@ func (p *Page) Snapshot(ctx context.Context, o SnapshotOptions) (*Snapshot, erro
 			s.Elements = append(s.Elements, Element{
 				Ref: ref(f.num, e.ID), Role: e.Role, Name: e.Name, Tag: e.Tag, Type: e.Type,
 				Value: e.Value, States: e.States, Href: e.Href, Options: e.Options,
-				Rect: rect, InView: inView, Frame: f.num, Free: e.Free,
+				Rect: rect, InView: inView, Frame: f.num, Free: e.Free, Covered: e.Covered,
 			})
 		}
 	}

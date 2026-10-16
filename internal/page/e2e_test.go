@@ -55,6 +55,12 @@ var fixtures = map[string]string{
 	"/covered": `<title>covered</title><button onclick="out.textContent='clicked'">Hidden target</button><p id=out></p>
 <div style="position:fixed;inset:0;background:white;z-index:9" id=overlay>overlay</div>`,
 
+	"/widgetinput": `<title>widget</title><div role=combobox aria-label="Where to?" tabindex=0 style="width:200px;height:40px;border:1px solid #888" onclick="out.textContent='wrapper clicked'">Where to?</div>
+<input aria-label="Search places" style="position:absolute;left:0;top:0;width:200px;height:40px" onfocus="out.textContent='input focused'"><p id=out style="margin-top:80px"></p>`,
+
+	"/widgetinput2": `<title>widget2</title><input role=combobox aria-label="Where to?" style="width:200px;height:40px">
+<input aria-label="Where to?" style="position:absolute;left:0;top:0;width:200px;height:40px" onfocus="out.textContent='input focused'"><p id=out style="margin-top:80px"></p>`,
+
 	"/dialogs": `<title>dialogs</title>
 <button onclick="alert('hello alert'); out.textContent='after alert'">Alert</button>
 <button onclick="out.textContent = confirm('sure?') ? 'confirmed' : 'cancelled'">Confirm</button>
@@ -286,6 +292,31 @@ func TestCoveredTargetIsRefused(t *testing.T) {
 	_, err := p.Click(ctx, find(t, s, "button", "Hidden target"), ClickOptions{})
 	if err == nil || !strings.Contains(err.Error(), "covered by <div#overlay>") {
 		t.Fatalf("want covered error, got %v", err)
+	}
+}
+
+// A search input drawn exactly over a combobox is the widget's own input: the
+// click is not refused as "covered" and lands in the input.
+func TestOverlayInputOfWidgetIsNotACover(t *testing.T) {
+	p, ctx := open(t, "/widgetinput")
+	s := snap(t, p, ctx)
+	r := find(t, s, "combobox", "Where to?")
+	if _, err := p.Click(ctx, r, ClickOptions{}); err != nil {
+		t.Fatalf("click refused: %v", err)
+	}
+	if err := p.WaitText(ctx, "input focused", false, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOverlayInputWithSameNameIsTheSameWidget(t *testing.T) {
+	p, ctx := open(t, "/widgetinput2")
+	s := snap(t, p, ctx)
+	if _, err := p.Click(ctx, find(t, s, "combobox", "Where to?"), ClickOptions{}); err != nil {
+		t.Fatalf("click refused: %v", err)
+	}
+	if err := p.WaitText(ctx, "input focused", false, 2*time.Second); err != nil {
+		t.Fatal(err)
 	}
 }
 

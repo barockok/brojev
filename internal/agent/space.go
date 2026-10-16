@@ -170,7 +170,7 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int, w window) *spa
 			desc["position"] = "offscreen"
 		}
 		disabled := has(e.States, "disabled")
-		if disabled {
+		if disabled || e.Covered {
 			continue
 		}
 		if e.Role == "canvas" {

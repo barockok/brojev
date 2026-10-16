@@ -54,6 +54,10 @@ func TestMain(m *testing.M) {
 			fmt.Fprint(w, `<!doctype html><title>boot</title><p>Loading...</p><script>setTimeout(()=>{document.body.innerHTML=`+"`"+`<form onsubmit="event.preventDefault(); out.textContent='Welcome, '+n.value"><label>Name <input id=n name=n></label><button>Create account</button></form><p id=out></p>`+"`"+`},1200)</script>`)
 			return
 		}
+		if r.URL.Path == "/noop" {
+			fmt.Fprint(w, `<!doctype html><title>noop</title><button>Do nothing</button> <button>Other</button>`)
+			return
+		}
 		if r.URL.Path == "/big" {
 			var b strings.Builder
 			b.WriteString("<!doctype html><title>big</title>")
@@ -250,7 +254,7 @@ func TestLoopFillsSelectsSubmits(t *testing.T) {
 
 func TestLowConfidenceStopsForClaude(t *testing.T) {
 	e := newEnv(t)
-	j, _ := fakeJev(t, func(r *req) (string, string, float64) { return "CLICK", index(r, "Create account"), 0.42 }) // joint 0.18 < 0.2, still argmax
+	j, _ := fakeJev(t, func(r *req) (string, string, float64) { return "HOVER", index(r, "Create account"), 0.42 }) // joint 0.18 < 0.2, still argmax
 	out, err := (&Runner{Jev: j, Env: e}).Run(context.Background(), Task{Goal: "do something vague", URL: base})
 	if err != nil {
 		t.Fatal(err)
@@ -394,5 +398,35 @@ func TestHelperHintReachesUnnamedTarget(t *testing.T) {
 	}
 	if out.HelperMS < 0 {
 		t.Fatal("helper time not accounted")
+	}
+}
+
+// A click that changes nothing is not offered again until the page changes, so
+// Jev has to try something else.
+func TestNoopClickIsNotOfferedAgain(t *testing.T) {
+	e := newEnv(t)
+	j, seen := fakeJev(t, func(r *req) (string, string, float64) {
+		return "CLICK", index(r, "Do nothing"), 0.9
+	})
+	_, _ = (&Runner{Jev: j, Env: e}).Run(context.Background(), Task{Goal: "x", URL: base + "/noop", MaxSteps: 4})
+	if len(*seen) < 2 {
+		t.Fatalf("only %d decisions", len(*seen))
+	}
+	offered := func(q req, label string) bool {
+		for _, c := range q.Questions["click_target"].Criteria {
+			if m, ok := c.(map[string]any); ok && strings.Contains(fmt.Sprint(m["element"]), label) {
+				return true
+			}
+		}
+		return false
+	}
+	if !offered((*seen)[0], "Do nothing") {
+		t.Fatal("setup: first decision should offer the button")
+	}
+	if offered((*seen)[1], "Do nothing") {
+		t.Fatal("a click that changed nothing was offered again on the same page")
+	}
+	if !offered((*seen)[1], "Other") {
+		t.Fatal("the other button must still be offered")
 	}
 }

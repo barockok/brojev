@@ -158,6 +158,8 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 
 	var history []hist
 	var lastFP uint64
+	noopClick := map[string]uint64{} // ref -> page fingerprint at which a click on it changed nothing
+	lastClickRef := ""
 	executed, decisions, lowConf, failures := 0, 0, 0, 0
 	settledFirst := t.URL != ""
 	blockedAt := map[uint64]bool{}
@@ -165,6 +167,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 	limit := maxOptions
 	win, navMoves := window{}, 0
 	invalid := 0
+	soft := 0
 	var prevShot []byte
 	visionOff := os.Getenv("BROJEV_VISION") == "off"
 	hintCache := map[uint64][]string{}
@@ -195,12 +198,21 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		fp := fingerprint(snap)
 		if n := len(history); n > 0 && history[n-1].Error == "" {
 			history[n-1].PageChanged = fp != lastFP
+			if fp == lastFP && lastClickRef != "" && history[n-1].Kind == "CLICK" {
+				noopClick[lastClickRef] = fp // a click that did nothing is not offered again until the page changes
+			}
 			out.Steps[len(out.Steps)-1].PageChanged = history[n-1].PageChanged
 			if stalled(history) {
 				return finish(p, "blocked", "no progress: the last 3 actions did not change the page")
 			}
 		}
 		lastFP = fp
+		for ref, f := range noopClick {
+			if f != fp {
+				delete(noopClick, ref)
+			}
+		}
+		lastClickRef = ""
 		if executed >= t.MaxSteps {
 			return finish(p, "budget", fmt.Sprintf("step limit %d reached", t.MaxSteps))
 		}
@@ -252,6 +264,9 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				if err != nil {
 					continue // leave it to Jev; typed[] stops a retry loop
 				}
+				if isCombo(snap, f.el.Ref) {
+					waitSuggestions(ctx, p, optionCount(snap), 400*time.Millisecond)
+				}
 				executed++
 				out.Steps = append(out.Steps, st)
 				r.emit(st)
@@ -289,6 +304,14 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			}
 		}
 		sp := buildSpace(snap, t, r.LLM != nil, limit, w)
+		if h := sp.heads["CLICK"]; h != nil && len(noopClick) > 0 && len(h.options) > len(noopClick) {
+			for k, o := range h.options {
+				if noopClick[o.ref] == fp {
+					delete(h.options, k)
+					delete(h.criteria, k)
+				}
+			}
+		}
 		state := map[string]any{
 			"page":           map[string]any{"url": snap.URL, "title": snap.Title, "text": snap.Text},
 			"elements":       sp.table,
@@ -635,6 +658,9 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				if actErr == nil {
 					step.Text, h.Text = text, text
 					res, actErr = p.Type(ctx, o.ref, text, page.TypeOptions{Submit: op == "TYPE_SUBMIT"})
+					if actErr == nil && isCombo(snap, o.ref) {
+						waitSuggestions(ctx, p, optionCount(snap), 400*time.Millisecond)
+					}
 				}
 			}
 		}
@@ -655,6 +681,12 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			r.emit(step)
 			history = append(history, h)
 			failures++
+			if timing(actErr) && soft < 10 {
+				// Covered or stale targets are timing, not a wrong choice: look
+				// again instead of counting toward the three-strikes stop.
+				soft++
+				failures--
+			}
 			if errors.Is(actErr, page.ErrDialogOpen) {
 				failures = 0 // the next snapshot shows the dialog
 				continue
@@ -670,6 +702,9 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		failures = 0
 		executed++
 		win, navMoves = window{}, 0
+		if op == "CLICK" {
+			lastClickRef = step.Ref
+		}
 		if res != nil && res.Dialog != nil {
 			step.Note = "opened " + res.Dialog.Type + " dialog"
 		}
@@ -744,6 +779,44 @@ func settle(ctx context.Context, p *page.Page, budget time.Duration) {
 	}
 }
 
+// optionCount counts visible suggestion rows (options, menu items, listboxes).
+func optionCount(s *page.Snapshot) int {
+	n := 0
+	for _, e := range s.Elements {
+		if e.InView && (e.Role == "option" || e.Role == "menuitem" || e.Role == "listbox") {
+			n++
+		}
+	}
+	return n
+}
+
+// waitSuggestions gives an autocomplete a moment to show its suggestions after
+// typing, so the next decision sees them instead of an empty popup. It returns
+// early once more suggestion rows are visible than before.
+func waitSuggestions(ctx context.Context, p *page.Page, before int, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		select {
+		case <-time.After(60 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
+		s, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: -1, MaxOffscreen: 0})
+		if err != nil || s.Dialog != nil || optionCount(s) > before {
+			return
+		}
+	}
+}
+
+func isCombo(s *page.Snapshot, ref string) bool {
+	for _, e := range s.Elements {
+		if e.Ref == ref {
+			return e.Role == "combobox" || e.Role == "searchbox" || e.Role == "textbox" && e.Type == "search"
+		}
+	}
+	return false
+}
+
 // waitChange polls until the page fingerprint differs from fp or budget ends.
 func waitChange(ctx context.Context, p *page.Page, fp uint64, budget time.Duration) {
 	deadline := time.Now().Add(budget)
@@ -784,6 +857,12 @@ func (r *Runner) emit(s Step) {
 	if r.OnStep != nil {
 		r.OnStep(s)
 	}
+}
+
+// timing errors mean the page moved under the action, not that Jev chose badly.
+func timing(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "covered by") || strings.Contains(s, "stale ref")
 }
 
 func retryable(err error) bool {
@@ -839,7 +918,14 @@ func fingerprint(s *page.Snapshot) uint64 {
 	fmt.Fprint(f, s.URL, "|", s.Dialog != nil, "|", len(s.Text), "|")
 	f.Write([]byte(s.Text))
 	for _, e := range s.Elements {
-		fmt.Fprint(f, e.Role, e.Name, e.States, e.InView, "|")
+		// Focus moving to the clicked control is not page progress.
+		st := make([]string, 0, len(e.States))
+		for _, x := range e.States {
+			if x != "focused" {
+				st = append(st, x)
+			}
+		}
+		fmt.Fprint(f, e.Role, e.Name, st, e.InView, "|")
 		if e.Value != nil {
 			f.Write([]byte(*e.Value))
 		}

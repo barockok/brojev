@@ -2,7 +2,7 @@
 // scripts cannot see or tamper with it. Element refs are stable integer ids
 // held through WeakRefs: a ref stays valid while its node stays connected.
 (() => {
-  const VERSION = 10;
+  const VERSION = 13;
   if (globalThis.__bj && globalThis.__bj.v === VERSION) return;
 
   const ids = new WeakMap();
@@ -294,6 +294,13 @@
         item.options = Array.from(el.options).slice(0, 50).map((o) => clean(o.label || o.text, 60));
       }
       if (el.localName === "input" && el.type) item.type = el.type;
+      if (inView && el.localName !== "canvas") {
+        // Something else sits on top of this control's centre (a popup, an
+        // overlay input): it cannot be clicked now, so it is not offered.
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        const hit = cx >= 0 && cy >= 0 && cx < vw && cy < vh ? deepHit(cx, cy) : null;
+        if (hit && !owns(el, hit) && !el.contains(hit)) item.covered = true;
+      }
       if (el.localName === "canvas") {
         // Which cells of a 5x6 grid reach the canvas itself and not toolbars
         // or panels floating above it ("1" free, "0" covered/offscreen).
@@ -394,9 +401,22 @@
     return e;
   };
 
+  // A text control drawn over a combobox/button-like widget is that widget's
+  // own input (Google Flights opens a search box exactly over "Where to?").
+  const widgetInput = (el, hit) => {
+    if (!hit || !(hit.localName === "input" || hit.localName === "textarea" || hit.isContentEditable)) return false;
+    // Two real inputs only count as one widget when they carry the same name.
+    if ((el.localName === "input" || el.localName === "textarea") && (!name(el) || name(el) !== name(hit))) return false;
+    const a = el.getBoundingClientRect(), b = hit.getBoundingClientRect();
+    const w = Math.min(a.right, b.right) - Math.max(a.left, b.left), h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    if (w <= 0 || h <= 0) return false;
+    return (w * h) / (a.width * a.height) >= 0.6;
+  };
+
   const owns = (el, hit) => {
     for (let n = hit; n; n = n.parentNode || n.host) if (n === el) return true;
     if (el.labels) for (const l of el.labels) if (l.contains(hit)) return true;
+    if (widgetInput(el, hit)) return true;
     return false;
   };
 

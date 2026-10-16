@@ -257,3 +257,25 @@ func TestVisualDelta(t *testing.T) {
 		t.Fatalf("a drawn shape: %s", got)
 	}
 }
+
+func TestCoveredElementsAreNotOffered(t *testing.T) {
+	s := &page.Snapshot{Viewport: [2]float64{1000, 800}, Elements: []page.Element{
+		{Ref: "e1", Role: "combobox", Name: "Where to?", Tag: "input", Type: "text", InView: true, Covered: true},
+		{Ref: "e2", Role: "combobox", Name: "Where to?", Tag: "input", Type: "text", InView: true},
+		{Ref: "e3", Role: "button", Name: "Search", Tag: "button", InView: true},
+	}}
+	sp := buildSpace(s, Task{Goal: "x", Values: map[string]string{"destination": "Denpasar"}}, false, maxOptions, window{})
+	for _, o := range sp.heads["CLICK"].options {
+		if o.ref == "e1" {
+			t.Fatal("covered control offered for CLICK")
+		}
+	}
+	for _, o := range sp.heads["TYPE_TEXT"].options {
+		if o.ref == "e1" {
+			t.Fatal("covered control offered for TYPE_TEXT")
+		}
+	}
+	if len(sp.heads["CLICK"].options) != 2 {
+		t.Fatalf("want e2 and e3 offered, got %d", len(sp.heads["CLICK"].options))
+	}
+}
