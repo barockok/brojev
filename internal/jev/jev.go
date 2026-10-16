@@ -151,7 +151,32 @@ func (n Noul) MarshalJSON() ([]byte, error) {
 	}{"noul", n.Instructions})
 }
 
+// Box asks where an object is in an image: the answer is a bounding box in
+// fractions (0..1) of the image, origin top-left. Needs Jev 1.14.
+type Box struct {
+	Instructions any `json:"instructions"`
+}
+
+func (b Box) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type         string `json:"type"`
+		Instructions any    `json:"instructions"`
+	}{"box", b.Instructions})
+}
+
+// BoxModel serves requests that contain Box questions.
+const BoxModel = "jev-preview"
+
+// BoxEdges is a Box answer's rectangle.
+type BoxEdges struct {
+	Top    float64 `json:"top"`
+	Bottom float64 `json:"bottom"`
+	Left   float64 `json:"left"`
+	Right  float64 `json:"right"`
+}
+
 type Answer struct {
+	Box           *BoxEdges          `json:"box,omitempty"`
 	Noul          *float64           `json:"noul,omitempty"`
 	Type          string             `json:"type"`
 	Choice        string             `json:"choice"`
@@ -182,15 +207,19 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Res
 
 // AskWith is Ask with images: each key of assets is a reference string that
 // state (or a question) mentions where the image belongs.
-func (c *Client) AskWith(ctx context.Context, state any, qs map[string]Choice, assets map[string]Asset, nouls map[string]Noul) (*Response, error) {
-	all := make(map[string]any, len(qs)+len(nouls))
+func (c *Client) AskWith(ctx context.Context, state any, qs map[string]Choice, assets map[string]Asset, extra map[string]any) (*Response, error) {
+	all := make(map[string]any, len(qs)+len(extra))
 	for k, v := range qs {
 		all[k] = v
 	}
-	for k, v := range nouls {
+	model := c.Model
+	for k, v := range extra { // Noul and Box questions
 		all[k] = v
+		if _, isBox := v.(Box); isBox {
+			model = BoxModel
+		}
 	}
-	body, err := json.Marshal(Request{Model: c.Model, State: state, Questions: all, Assets: assets})
+	body, err := json.Marshal(Request{Model: model, State: state, Questions: all, Assets: assets})
 	if err != nil {
 		return nil, err
 	}

@@ -669,6 +669,7 @@ const ruleCanvasClick = `Choose the canvas cell to click. Cells form a grid over
 const ruleCanvasFrom = `Choose the canvas cell where the drag starts, using the screenshot and the cell position names. The same cell for start and end gives a short drag inside it.`
 const ruleCanvasTo = `Choose the canvas cell where the drag ends. For an area (box, selection, shape) choose a cell in a different row and column from the start; for a path or line, the cell it ends in.`
 const ruleFind = `Choose the phrase most likely to appear in the name of the element the goal needs next. The examples show names that contain it.`
+const ruleVisualTarget = `Choose the described thing to click, using the screenshot. Prefer an entry from the element list when one exists; use this only for what the list cannot name.`
 const rulePrompt = `Choose the text to type into the prompt dialog. Never invent text.`
 const ruleTypeSubmit = `Same choices as typing, but Enter is pressed afterwards. Choose it when the goal needs the entry submitted (add an item, search, send).
 Do not choose a field that already contains the requested value.`

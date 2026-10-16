@@ -97,3 +97,28 @@ func TestAskWithImageRejectedIsDistinct(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestBoxQuestionUsesPreviewModelAndParsesBox(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		w.Write([]byte(`{"model":"jev-1.14.0","answers":{"b":{"type":"box","box":{"top":0.1,"bottom":0.5,"left":0.2,"right":0.4},"confidence":0.9}},"usage":{}}`))
+	}))
+	defer srv.Close()
+	c := &Client{Key: "k", Model: "jev-latest", Endpoint: srv.URL, HTTP: srv.Client()}
+	resp, err := c.AskWith(context.Background(), map[string]any{}, map[string]Choice{}, map[string]Asset{"r": Image([]byte{0xFF, 0xD8, 0xFF})}, map[string]any{"b": Box{Instructions: "the mug in `r`"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["model"] != BoxModel {
+		t.Fatalf("model %v", body["model"])
+	}
+	q := body["questions"].(map[string]any)["b"].(map[string]any)
+	if q["type"] != "box" {
+		t.Fatalf("question %v", q)
+	}
+	a := resp.Answers["b"]
+	if a.Box == nil || a.Box.Left != 0.2 || a.Box.Bottom != 0.5 || a.Confidence != 0.9 {
+		t.Fatalf("answer %+v", a)
+	}
+}
