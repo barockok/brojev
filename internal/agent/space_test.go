@@ -1,7 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"strings"
 	"testing"
 
 	"github.com/barockok/brojev/internal/page"
@@ -201,22 +206,54 @@ func TestFindCandidatesTakeValidatedHints(t *testing.T) {
 	}
 }
 
-func TestUsedCanvasCellsAreNotOfferedAgain(t *testing.T) {
-	canvas := page.Element{Ref: "e1", Role: "canvas", Tag: "canvas", InView: true, Rect: [4]float64{0, 0, 1200, 750}}
-	s := &page.Snapshot{Viewport: [2]float64{1280, 800}, Elements: []page.Element{canvas}}
-	used := usedCells([]hist{{Kind: "CANVAS_DRAG", Action: "drag on canvas r2c2 to r4c3"}})
-	for _, k := range []string{"r2c2", "r3c2", "r4c3", "r3c3"} {
-		if !used[k] {
-			t.Fatalf("%s should be used: %v", k, used)
+func TestWantVision(t *testing.T) {
+	many := func(n int) []page.Element { return make([]page.Element, n) }
+	if wantVision(&page.Snapshot{Elements: many(20)}, nil, 0) {
+		t.Fatal("a well-described page needs no screenshot")
+	}
+	if !wantVision(&page.Snapshot{Elements: many(2), Text: "x"}, nil, 0) {
+		t.Fatal("a nearly empty page should trigger vision")
+	}
+	if wantVision(&page.Snapshot{Elements: many(2), Text: strings.Repeat("readable text ", 40)}, nil, 0) {
+		t.Fatal("a text-rich page with few controls (infinite scroll, article) stays DOM-only")
+	}
+	withCanvas := append(many(20), page.Element{Role: "canvas"})
+	if !wantVision(&page.Snapshot{Elements: withCanvas}, nil, 0) {
+		t.Fatal("a canvas should trigger vision")
+	}
+	// Hesitation or a no-op on an ordinary page does not: the DOM says more.
+	if wantVision(&page.Snapshot{Elements: many(20)}, []hist{{Kind: "CLICK", PageChanged: false}}, 1) {
+		t.Fatal("ordinary pages stay DOM-only")
+	}
+}
+
+func solidJPEG(c color.Color, box *image.Rectangle) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 400, 300))
+	for y := 0; y < 300; y++ {
+		for x := 0; x < 400; x++ {
+			img.Set(x, y, color.White)
 		}
 	}
-	sp := buildSpace(s, Task{Goal: "draw"}, false, maxOptions, window{used: used})
-	for k := range sp.heads["CANVAS_DRAG"].options {
-		if used[k] {
-			t.Fatalf("used cell %s offered", k)
+	if box != nil {
+		for y := box.Min.Y; y < box.Max.Y; y++ {
+			for x := box.Min.X; x < box.Max.X; x++ {
+				img.Set(x, y, c)
+			}
 		}
 	}
-	if len(sp.heads["CANVAS_DRAG"].options) != 30-6 {
-		t.Fatalf("free cells: %d", len(sp.heads["CANVAS_DRAG"].options))
+	var buf bytes.Buffer
+	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 75})
+	return buf.Bytes()
+}
+
+func TestVisualDelta(t *testing.T) {
+	blank := solidJPEG(color.White, nil)
+	r := image.Rect(100, 80, 220, 200)
+	drawn := solidJPEG(color.Black, &r)
+	if got := visualDelta(blank, blank); got != "none" {
+		t.Fatalf("identical frames: %s", got)
+	}
+	if got := visualDelta(blank, drawn); got != "changed" {
+		t.Fatalf("a drawn shape: %s", got)
 	}
 }

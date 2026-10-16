@@ -3,10 +3,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 	"regexp"
 	"sort"
@@ -51,6 +55,7 @@ type Step struct {
 	PageChanged bool    `json:"pageChanged"`
 	Error       string  `json:"error,omitempty"`
 	Note        string  `json:"note,omitempty"`
+	Vision      bool    `json:"vision,omitempty"` // a screenshot was part of this decision
 	JevMS       int64   `json:"jevMs"`
 	ActMS       int64   `json:"actMs"`
 	AtMS        int64   `json:"atMs"`
@@ -98,7 +103,9 @@ type hist struct {
 	Text        string `json:"text,omitempty"`
 	PageChanged bool   `json:"page_changed"`
 	Error       string `json:"error,omitempty"`
-	Tool        string `json:"tool,omitempty"` // canvas drags: the active toolbar tool
+	// Visual compares the screenshots before and after the action: "none"
+	// (nothing moved on screen) or "changed". Empty when not measured.
+	Visual string `json:"visual_change,omitempty"`
 }
 
 func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
@@ -158,6 +165,8 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 	limit := maxOptions
 	win, navMoves := window{}, 0
 	invalid := 0
+	var prevShot []byte
+	visionOff := os.Getenv("BROJEV_VISION") == "off"
 	hintCache := map[uint64][]string{}
 	typed := map[string]bool{}
 
@@ -279,7 +288,6 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				w.hints = hs
 			}
 		}
-		w.used = usedCells(history)
 		sp := buildSpace(snap, t, r.LLM != nil, limit, w)
 		state := map[string]any{
 			"page":           map[string]any{"url": snap.URL, "title": snap.Title, "text": snap.Text},
@@ -290,18 +298,40 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			state["options_window"] = map[string]any{"offered": len(sp.view.els), "not_offered": len(sp.view.hidden),
 				"group": sp.view.page + 1, "groups": sp.view.pages, "phrase_filter": win.query}
 		}
-		if tools := pressedTools(snap); len(tools) > 0 {
-			state["active_tool"] = tools
-		}
-		if drawn := canvasDrawn(history); len(drawn) > 0 {
-			state["canvas_drawn"] = drawn // pixels are invisible to you: this is what you already drew
-		}
 		if snap.Dialog != nil {
 			state["dialog"] = map[string]string{"type": snap.Dialog.Type, "message": snap.Dialog.Message}
 		}
 		qs := sp.questions(t)
 		decisions++
-		resp, err := r.Jev.Ask(ctx, state, qs)
+		var assets map[string]jev.Asset
+		visionNow := false
+		if !visionOff && wantVision(snap, history, lowConf) {
+			if img, err := p.ScreenshotFit(ctx); err == nil {
+				if n := len(history); n > 0 && prevShot != nil && history[n-1].Error == "" && history[n-1].Visual == "" {
+					history[n-1].Visual = visualDelta(prevShot, img)
+				}
+				prevShot = img
+				const ref = "bj-screenshot-viewport"
+				state["screenshot"] = ref
+				assets = map[string]jev.Asset{ref: jev.Image(img)}
+				visionNow = true
+			}
+		}
+		var nouls map[string]jev.Noul
+		if visionNow {
+			// A second opinion on DONE from the same picture.
+			nouls = map[string]jev.Noul{"goal_satisfied": {Instructions: map[string]any{
+				"goal":     t.Goal,
+				"question": "Looking at `screenshot` (the current viewport) and recent_actions in state: is the user's entire goal already completely satisfied? Count what the goal asks for against what is visible; a missing or partial part means no.",
+			}}}
+		}
+		resp, err := r.Jev.AskWith(ctx, state, qs, assets, nouls)
+		if err != nil && errors.Is(err, jev.ErrImagesRejected) {
+			// This endpoint or key does not take images: carry on without.
+			visionOff = true
+			decisions--
+			continue
+		}
 		if err != nil {
 			if errors.Is(err, jev.ErrTooManyOptions) && limit > 30 {
 				limit /= 2 // trim the option lists harder and re-ask
@@ -324,6 +354,28 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				continue
 			}
 			return finish(p, "error", "jev: invalid operation answer: "+err.Error())
+		}
+		if os.Getenv("BROJEV_TRACE") != "" {
+			g := -1.0
+			if a, ok := resp.Answers["goal_satisfied"]; ok && a.Noul != nil {
+				g = *a.Noul
+			}
+			fmt.Fprintf(os.Stderr, "trace decide vision=%v op=%s p=%.2f goal_satisfied=%.2f\n", visionNow, opAns.Choice, opAns.Probabilities[opAns.Choice], g)
+		}
+		if opAns.Choice == "DONE" && visionNow {
+			if g, ok := resp.Answers["goal_satisfied"]; ok && g.Noul != nil && *g.Noul < 0.4 {
+				// Jev said done but the picture does not show a finished goal:
+				// take its best other operation instead.
+				best, bp := "", -1.0
+				for k, pr := range opAns.Probabilities {
+					if k != "DONE" && k != "BLOCKED" && pr > bp {
+						best, bp = k, pr
+					}
+				}
+				if best != "" {
+					opAns.Choice = best
+				}
+			}
 		}
 		op := opAns.Choice
 		conf := opAns.Probabilities[op]
@@ -348,7 +400,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			conf *= ta.Probabilities[target]
 		}
 
-		step := Step{N: len(out.Steps) + 1, Op: op, Confidence: round3(conf), JevMS: resp.Latency.Milliseconds(), AtMS: elapsed()}
+		step := Step{N: len(out.Steps) + 1, Op: op, Confidence: round3(conf), JevMS: resp.Latency.Milliseconds(), AtMS: elapsed(), Vision: visionNow}
 		if conf < t.MinConfidence && op != "WAIT" {
 			lowConf++
 			if lowConf >= 3 {
@@ -473,37 +525,18 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				actErr = errors.New("invalid canvas drag destination answer: " + err.Error())
 				break
 			}
-			tool := strings.ToLower(strings.Join(pressedTools(snap), "+"))
-			isLine := strings.Contains(tool, "arrow") || strings.Contains(tool, "line")
 			dest := ta.Choice
-			if dest == target && isLine {
-				// A line needs two different ends, but both are chosen in
-				// parallel: take the end Jev liked second best.
-				if dest = altChoice(ta.Probabilities, target); dest == "" {
-					actErr = errors.New("canvas drag start equals end")
-					break
-				}
-			}
 			to := sp.canvasTo.options[dest]
 			step.Target = target + " -> " + dest
 			h.Action = "drag on canvas " + target + " to " + dest
 			x1, y1, x2, y2 := from.x, from.y, to.x, to.y
-			if !isLine {
-				// Shapes span the whole box of both cells (a drag along one
-				// row would otherwise be flat and be discarded).
-				x1, x2 = min(from.x, to.x)-0.35*from.cw, max(from.x, to.x)+0.35*from.cw
-				y1, y2 = min(from.y, to.y)-0.35*from.ch, max(from.y, to.y)+0.35*from.ch
+			if dest == target {
+				// One cell: a short diagonal inside it, so the drag has extent.
+				x1, y1, x2, y2 = from.x-0.3*from.cw, from.y-0.3*from.ch, from.x+0.3*from.cw, from.y+0.3*from.ch
 			}
-			if idleTool(pressedTools(snap)) {
-				actErr = errors.New("canvas cells: no drawing tool is active (selection or hand): choose the shape tool in the toolbar first")
-				break
-			}
-			h.Tool = strings.Join(pressedTools(snap), "+")
 			for _, prev := range history {
 				if prev.Error == "" && prev.Action == h.Action {
-					// Same cells again stacks shapes on top of each other
-					// whatever the tool: a drawing needs distinct places.
-					actErr = errors.New("these canvas cells were already used (" + prev.Tool + "): choose different cells for this shape")
+					actErr = errors.New("identical canvas drag repeated: it already ran; look at the screenshot and choose something different")
 					break
 				}
 			}
@@ -572,16 +605,6 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				if actErr == nil {
 					step.Text, h.Text = text, text
 					res, actErr = p.Type(ctx, o.ref, text, page.TypeOptions{Submit: op == "TYPE_SUBMIT"})
-				}
-			}
-		}
-		if actErr == nil && op == "CANVAS_DRAG" {
-			// Apps may keep the drawing tool locked after a shape (Excalidraw's
-			// "keep tool active"): drop back to the idle tool so every shape
-			// needs an explicit tool choice, as on a fresh profile.
-			if again, err := p.Snapshot(ctx, decideSnap); err == nil {
-				if tools := pressedTools(again); len(tools) > 0 && !idleTool(tools) {
-					_, _ = p.Key(ctx, "Escape")
 				}
 			}
 		}
@@ -735,7 +758,7 @@ func (r *Runner) emit(s Step) {
 
 func retryable(err error) bool {
 	s := err.Error()
-	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context", "invalid canvas drag", "invalid drag destination", "canvas cells were already used", "no drawing tool is active"} {
+	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context", "invalid canvas drag", "invalid drag destination", "identical canvas drag"} {
 		if strings.Contains(s, k) {
 			return true
 		}
@@ -934,43 +957,61 @@ func describeCell(h *head, key string) string {
 	return ""
 }
 
-// idleTool is true when the pressed toolbar buttons are all selection/hand.
-func idleTool(tools []string) bool {
-	if len(tools) == 0 {
+// wantVision decides whether this decision carries a screenshot. BROJEV_VISION:
+// "always", "off", or "auto" (default): look only when the element list cannot
+// show the content: a canvas on the page, or almost nothing actionable or readable. On
+// ordinary pages the DOM is the better evidence and extra images only add noise.
+func wantVision(s *page.Snapshot, h []hist, lowConf int) bool {
+	switch os.Getenv("BROJEV_VISION") {
+	case "off":
+		return false
+	case "always":
+		return true
+	}
+	if s.Dialog != nil {
 		return false
 	}
-	for _, t := range tools {
-		l := strings.ToLower(t)
-		if !strings.Contains(l, "selection") && !strings.Contains(l, "hand") {
-			return false
-		}
+	if len(s.Elements) < 4 && len(s.Text) < 300 {
+		return true // almost nothing to read or act on: the content is not in the DOM
 	}
-	return true
-}
-
-// pressedTools lists toolbar buttons currently pressed (the active drawing tool).
-func pressedTools(s *page.Snapshot) []string {
-	var out []string
 	for _, e := range s.Elements {
-		if e.InView && e.Name != "" && has(e.States, "pressed") && len(e.Name) < 40 {
-			out = append(out, e.Name)
+		if e.Role == "canvas" {
+			return true
 		}
 	}
-	return out
+	return false
 }
 
-// canvasDrawn summarizes successful canvas drags so far, since the canvas
-// content itself is not visible to Jev.
-func canvasDrawn(h []hist) []string {
-	var out []string
-	for _, x := range h {
-		if x.Kind == "CANVAS_DRAG" && x.Error == "" {
-			tool := x.Tool
-			if tool == "" {
-				tool = "(unknown tool)"
+// visualDelta reports whether two screenshots differ visibly: "none" when
+// under 0.05% of sampled pixels changed noticeably (JPEG noise is ignored).
+func visualDelta(a, b []byte) string {
+	ia, _, err1 := image.Decode(bytes.NewReader(a))
+	ib, _, err2 := image.Decode(bytes.NewReader(b))
+	if err1 != nil || err2 != nil || ia.Bounds() != ib.Bounds() {
+		return "changed"
+	}
+	bd := ia.Bounds()
+	diff, total := 0, 0
+	for y := bd.Min.Y; y < bd.Max.Y; y += 2 {
+		for x := bd.Min.X; x < bd.Max.X; x += 2 {
+			r1, g1, b1, _ := ia.At(x, y).RGBA()
+			r2, g2, b2, _ := ib.At(x, y).RGBA()
+			d := absDiff(r1, r2) + absDiff(g1, g2) + absDiff(b1, b2)
+			total++
+			if d > 3*0x1800 {
+				diff++
 			}
-			out = append(out, tool+": "+strings.TrimPrefix(x.Action, "drag on canvas "))
 		}
 	}
-	return out
+	if total == 0 || float64(diff)/float64(total) < 0.0005 {
+		return "none"
+	}
+	return "changed"
+}
+
+func absDiff(a, b uint32) uint32 {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -755,6 +756,42 @@ func (p *Page) Screenshot(ctx context.Context, full bool) ([]byte, error) {
 	q := int64(75)
 	res, err := cdproto.Call(ctx, p.S, cdppage.CaptureScreenshot, cdppage.CaptureScreenshotParams{
 		Format: cdppage.CaptureScreenshotFormatJpeg, Quality: &q, CaptureBeyondViewport: &full,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.Data, nil
+}
+
+// ScreenshotFit captures the viewport as a JPEG scaled to fit an image model:
+// each side within [280, 1568] px and at most 2,400,000 pixels (larger images
+// are rejected, not resized, by the API).
+func (p *Page) ScreenshotFit(ctx context.Context) ([]byte, error) {
+	if p.OpenDialog() != nil {
+		return nil, ErrDialogOpen
+	}
+	vp, err := p.viewport(ctx)
+	if err != nil {
+		return nil, err
+	}
+	w, h := vp[0], vp[1]
+	if w < 1 || h < 1 {
+		return nil, errors.New("empty viewport")
+	}
+	scale := 1.0
+	if m := max(w, h); m > 1568 {
+		scale = 1568 / m
+	}
+	if px := w * h * scale * scale; px > 2400000 {
+		scale *= math.Sqrt(2400000 / px)
+	}
+	if min(w, h)*scale < 280 {
+		return nil, fmt.Errorf("viewport %gx%g too small for an image", w, h)
+	}
+	q := int64(75)
+	res, err := cdproto.Call(ctx, p.S, cdppage.CaptureScreenshot, cdppage.CaptureScreenshotParams{
+		Format: cdppage.CaptureScreenshotFormatJpeg, Quality: &q,
+		Clip: &cdppage.Viewport{X: 0, Y: 0, Width: w, Height: h, Scale: scale},
 	})
 	if err != nil {
 		return nil, err

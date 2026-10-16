@@ -5,6 +5,7 @@ package jev
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,13 +112,47 @@ func (c Choice) MarshalJSON() ([]byte, error) {
 	}{"choice", alias(c)})
 }
 
+// Asset is an image referenced from state or a question by its map key.
+type Asset struct {
+	Type   string `json:"type"`
+	Format string `json:"format"`
+	Data   string `json:"data_base64"`
+}
+
 type Request struct {
-	Model     string            `json:"model"`
-	State     any               `json:"state"`
-	Questions map[string]Choice `json:"questions"`
+	Model     string           `json:"model"`
+	State     any              `json:"state"`
+	Questions map[string]any   `json:"questions"`
+	Assets    map[string]Asset `json:"assets,omitempty"`
+}
+
+// ErrImagesRejected: the endpoint refused a request that carried an image
+// (images not enabled for the key or route). Retry without the image.
+var ErrImagesRejected = errors.New("jev: images rejected")
+
+// Image wraps JPEG or PNG bytes as an Asset.
+func Image(data []byte) Asset {
+	format := "jpg"
+	if len(data) > 4 && string(data[1:4]) == "PNG" {
+		format = "png"
+	}
+	return Asset{Type: "image", Format: format, Data: base64.StdEncoding.EncodeToString(data)}
+}
+
+// Noul is a yes/no question; the answer is the probability of yes.
+type Noul struct {
+	Instructions any `json:"instructions"`
+}
+
+func (n Noul) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type         string `json:"type"`
+		Instructions any    `json:"instructions"`
+	}{"noul", n.Instructions})
 }
 
 type Answer struct {
+	Noul          *float64           `json:"noul,omitempty"`
 	Type          string             `json:"type"`
 	Choice        string             `json:"choice"`
 	Probabilities map[string]float64 `json:"probabilities"`
@@ -142,7 +177,20 @@ var ErrTooManyOptions = errors.New("jev: too many options in a question")
 
 // Ask sends all questions in one request; they run in parallel server-side.
 func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Response, error) {
-	body, err := json.Marshal(Request{Model: c.Model, State: state, Questions: qs})
+	return c.AskWith(ctx, state, qs, nil, nil)
+}
+
+// AskWith is Ask with images: each key of assets is a reference string that
+// state (or a question) mentions where the image belongs.
+func (c *Client) AskWith(ctx context.Context, state any, qs map[string]Choice, assets map[string]Asset, nouls map[string]Noul) (*Response, error) {
+	all := make(map[string]any, len(qs)+len(nouls))
+	for k, v := range qs {
+		all[k] = v
+	}
+	for k, v := range nouls {
+		all[k] = v
+	}
+	body, err := json.Marshal(Request{Model: c.Model, State: state, Questions: all, Assets: assets})
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +202,9 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Res
 		}
 		req.Header.Set("Authorization", "Bearer "+c.Key)
 		req.Header.Set("Content-Type", "application/json")
+		if len(assets) > 0 {
+			req.Header.Set("TypeSafe-Danger-Zone-Images", "true")
+		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("jev: request failed; no action executed: %w", err)
@@ -168,6 +219,8 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Res
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
+		case len(assets) > 0 && (resp.StatusCode == 400 || resp.StatusCode == 413 || resp.StatusCode == 403):
+			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrImagesRejected, resp.StatusCode, truncate(string(data), 200))
 		case resp.StatusCode == 422 && strings.Contains(string(data), "at most"):
 			return nil, fmt.Errorf("%w: %s", ErrTooManyOptions, truncate(string(data), 200))
 		case resp.StatusCode >= 300:

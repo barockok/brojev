@@ -2,6 +2,7 @@ package jev
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -60,6 +61,39 @@ func TestAsk422TooManyOptions(t *testing.T) {
 	c := &Client{Key: "k", Model: "m", Endpoint: srv.URL, HTTP: srv.Client()}
 	_, err := c.Ask(context.Background(), map[string]any{}, map[string]Choice{})
 	if !errors.Is(err, ErrTooManyOptions) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestAskWithSendsImagesAndHeader(t *testing.T) {
+	var gotHeader string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("TypeSafe-Danger-Zone-Images")
+		json.NewDecoder(r.Body).Decode(&body)
+		w.Write([]byte(`{"model":"m","answers":{},"usage":{}}`))
+	}))
+	defer srv.Close()
+	c := &Client{Key: "k", Model: "m", Endpoint: srv.URL, HTTP: srv.Client()}
+	img := []byte{0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3}
+	if _, err := c.AskWith(context.Background(), map[string]any{"screenshot": "ref1"}, map[string]Choice{}, map[string]Asset{"ref1": Image(img)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	a := body["assets"].(map[string]any)["ref1"].(map[string]any)
+	if gotHeader != "true" || a["type"] != "image" || a["format"] != "jpg" || a["data_base64"] == "" {
+		t.Fatalf("header=%q asset=%v", gotHeader, a)
+	}
+	if _, err := c.Ask(context.Background(), map[string]any{}, map[string]Choice{}); err != nil || gotHeader != "" {
+		t.Fatalf("plain Ask must not send the images header (%q, %v)", gotHeader, err)
+	}
+}
+
+func TestAskWithImageRejectedIsDistinct(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) }))
+	defer srv.Close()
+	c := &Client{Key: "k", Model: "m", Endpoint: srv.URL, HTTP: srv.Client()}
+	_, err := c.AskWith(context.Background(), map[string]any{}, map[string]Choice{}, map[string]Asset{"r": Image([]byte{0xFF, 0xD8, 0xFF})}, nil)
+	if !errors.Is(err, ErrImagesRejected) {
 		t.Fatalf("got %v", err)
 	}
 }
