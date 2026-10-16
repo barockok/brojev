@@ -127,11 +127,15 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			return finish(p, "error", err.Error())
 		}
 		out.NavMS = time.Since(ns).Milliseconds()
+		settle(ctx, p, settleBudget)
 	}
 
 	var history []hist
 	var lastFP uint64
 	executed, decisions, lowConf, failures := 0, 0, 0, 0
+	settledFirst, retriedBlocked := t.URL != "", false
+	limit := maxOptions
+	typed := map[string]bool{}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -141,6 +145,13 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		if err != nil {
 			return finish(p, "error", "snapshot: "+err.Error())
 		}
+		if !settledFirst && looksUnrendered(snap) {
+			// Attached to a tab that is still booting (SPA shell, loading text).
+			settledFirst = true
+			settle(ctx, p, settleBudget)
+			continue
+		}
+		settledFirst = true
 		fp := fingerprint(snap)
 		if n := len(history); n > 0 && history[n-1].Error == "" {
 			history[n-1].PageChanged = fp != lastFP
@@ -157,7 +168,28 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			return finish(p, "budget", "decision limit reached")
 		}
 
-		sp := buildSpace(snap, t, r.LLM != nil)
+		// Unambiguous field/value pairs need no model call.
+		if fills := prefills(snap, t.Values, typed); len(fills) > 0 && executed < t.MaxSteps {
+			for _, f := range fills {
+				typed[f.el.Name+"|"+f.key] = true
+				st := Step{N: len(out.Steps) + 1, Op: "TYPE_TEXT", Target: label(f.el.Ref, f.el), Ref: f.el.Ref, Text: f.text,
+					Confidence: 1, Note: "prefill " + f.key, AtMS: elapsed()}
+				as := time.Now()
+				_, err := p.Type(ctx, f.el.Ref, f.text, page.TypeOptions{})
+				st.ActMS = time.Since(as).Milliseconds()
+				out.ActMS += st.ActMS
+				if err != nil {
+					continue // leave it to Jev; typed[] stops a retry loop
+				}
+				executed++
+				out.Steps = append(out.Steps, st)
+				r.emit(st)
+				history = append(history, hist{Action: st.Target, Kind: "TYPE_TEXT", Text: f.text})
+			}
+			continue
+		}
+
+		sp := buildSpace(snap, t, r.LLM != nil, limit)
 		state := map[string]any{
 			"page":           map[string]any{"url": snap.URL, "title": snap.Title, "text": snap.Text},
 			"elements":       sp.table,
@@ -170,6 +202,11 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		decisions++
 		resp, err := r.Jev.Ask(ctx, state, qs)
 		if err != nil {
+			if errors.Is(err, jev.ErrTooManyOptions) && limit > 30 {
+				limit /= 2 // trim the option lists harder and re-ask
+				decisions--
+				continue
+			}
 			return finish(p, "error", err.Error())
 		}
 		out.JevCalls++
@@ -231,6 +268,15 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				return finish(p, "needs_claude", fmt.Sprintf("Jev chose DONE but expected text %q is not visible", t.Expect))
 			}
 			return finish(p, "done", "")
+		}
+		if op == "BLOCKED" && !retriedBlocked && executed == 0 {
+			// Often a half-rendered page, not a real wall: give it one settle
+			// and re-decide when the page moved. Costs ~300 ms when it did not.
+			retriedBlocked = true
+			settle(ctx, p, settleBudget)
+			if again, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen}); err == nil && fingerprint(again) != fp {
+				continue
+			}
 		}
 		if op == "BLOCKED" {
 			out.Steps = append(out.Steps, step)
@@ -357,6 +403,55 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		out.Steps = append(out.Steps, step)
 		r.emit(step)
 		history = append(history, h)
+	}
+}
+
+const (
+	settleBudget = 5 * time.Second
+	settlePoll   = 200 * time.Millisecond
+)
+
+// looksUnrendered is true for a page that is still booting: almost nothing
+// actionable, or visible text saying it is loading.
+func looksUnrendered(s *page.Snapshot) bool {
+	if s.Dialog != nil {
+		return false
+	}
+	if len(s.Elements) < 3 {
+		return true
+	}
+	if len(s.Text) < 400 && strings.Contains(strings.ToLower(s.Text), "loading") {
+		return true
+	}
+	return false
+}
+
+// settle returns once the page stops changing between polls, or after budget.
+// A page that looks unrendered must also change at least once (or exhaust the
+// budget): an unchanged empty shell is not "settled".
+func settle(ctx context.Context, p *page.Page, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	var prev uint64
+	have, changed := false, false
+	for time.Now().Before(deadline) {
+		s, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 2000, MaxOffscreen: -1})
+		if err != nil || s.Dialog != nil {
+			return
+		}
+		fp := fingerprint(s)
+		if have {
+			if fp != prev {
+				changed = true
+			} else if changed || !looksUnrendered(s) {
+				return
+			}
+		}
+		prev, have = fp, true
+		select {
+		case <-time.After(settlePoll):
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

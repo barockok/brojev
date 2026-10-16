@@ -39,6 +39,11 @@ type space struct {
 
 const maxOffscreen = 60
 
+// maxOptions is Jev's hard limit per question (255 criteria) minus headroom
+// for the pair/"other" entries a head can add. A bigger page gets ranked and
+// trimmed here instead of failing the whole request with HTTP 422.
+const maxOptions = 240
+
 var textTypes = map[string]bool{"": true, "text": true, "search": true, "email": true, "tel": true, "url": true,
 	"password": true, "number": true, "date": true, "time": true, "datetime-local": true, "month": true, "week": true}
 
@@ -74,7 +79,7 @@ func label(i string, e page.Element) string {
 	return s
 }
 
-func buildSpace(s *page.Snapshot, t Task, helper bool) *space {
+func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 	sp := &space{heads: map[string]*head{}, ops: map[string]string{}, refs: map[string]string{}}
 	for k := range t.Values {
 		sp.keys = append(sp.keys, k)
@@ -103,6 +108,7 @@ func buildSpace(s *page.Snapshot, t Task, helper bool) *space {
 			off++
 		}
 	}
+	els = rank(els, t, limit)
 
 	click := &head{qid: "click_target", options: map[string]option{}, criteria: map[string]any{}, rules: ruleClick}
 	hover := &head{qid: "hover_target", options: map[string]option{}, criteria: map[string]any{}, rules: ruleHover}
@@ -157,7 +163,7 @@ func buildSpace(s *page.Snapshot, t Task, helper bool) *space {
 			continue // never click a file input: it opens the OS picker
 		case e.Tag == "select":
 			for j, o := range e.Options {
-				if has(strings.Split(cur, ", "), o) {
+				if has(strings.Split(cur, ", "), o) || len(sel.options) >= limit {
 					continue
 				}
 				k := fmt.Sprintf("%s:%d", i, j+1)
@@ -249,6 +255,62 @@ func buildSpace(s *page.Snapshot, t Task, helper bool) *space {
 	sp.ops["BLOCKED"] = "No offered operation can make progress (login wall, captcha, missing information)"
 	return sp
 }
+
+// rank trims els to limit, keeping the ones most likely to matter: elements
+// whose name shares a word with the goal or a provided value name come first,
+// then the remaining in-view ones, then offscreen. Pages within the limit are
+// returned untouched, in DOM order.
+func rank(els []page.Element, t Task, limit int) []page.Element {
+	if len(els) <= limit {
+		return els
+	}
+	words := map[string]bool{}
+	add := func(s string) {
+		for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r > 127)
+		}) {
+			if len(w) >= 3 && !stopWords[w] {
+				words[w] = true
+			}
+		}
+	}
+	add(t.Goal)
+	for k := range t.Values {
+		add(k)
+	}
+	score := func(e page.Element) int {
+		n := 0
+		if e.InView {
+			n += 2
+		}
+		low := strings.ToLower(e.Name)
+		for w := range words {
+			if strings.Contains(low, w) {
+				n += 4
+				break
+			}
+		}
+		if len(t.Values) > 0 && editable(e) {
+			n++
+		}
+		return n
+	}
+	idx := make([]int, len(els))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return score(els[idx[a]]) > score(els[idx[b]]) })
+	keep := idx[:limit]
+	sort.Ints(keep) // back to DOM order so indices stay readable
+	out := make([]page.Element, 0, limit)
+	for _, i := range keep {
+		out = append(out, els[i])
+	}
+	return out
+}
+
+var stopWords = map[string]bool{"the": true, "and": true, "then": true, "with": true, "from": true, "that": true,
+	"this": true, "for": true, "into": true, "click": true, "fill": true, "button": true}
 
 func (sp *space) opKeys() map[string]bool {
 	m := map[string]bool{}

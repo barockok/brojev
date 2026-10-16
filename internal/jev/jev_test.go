@@ -1,6 +1,10 @@
 package jev
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -44,5 +48,18 @@ func TestKeyFromEnv(t *testing.T) {
 		if (c.err == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.err)) {
 			t.Errorf("%v: KeyError %v, want %q", c.env, err, c.err)
 		}
+	}
+}
+
+func TestAsk422TooManyOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		w.Write([]byte(`{"detail":[{"type":"too_long","msg":"Dictionary should have at most 255 items after validation, not 323"}]}`))
+	}))
+	defer srv.Close()
+	c := &Client{Key: "k", Model: "m", Endpoint: srv.URL, HTTP: srv.Client()}
+	_, err := c.Ask(context.Background(), map[string]any{}, map[string]Choice{})
+	if !errors.Is(err, ErrTooManyOptions) {
+		t.Fatalf("got %v", err)
 	}
 }

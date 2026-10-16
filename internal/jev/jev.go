@@ -136,6 +136,10 @@ type Response struct {
 	Latency time.Duration     `json:"-"`
 }
 
+// ErrTooManyOptions: the API rejected a question for having more criteria than
+// it allows (HTTP 422 "at most 255 items").
+var ErrTooManyOptions = errors.New("jev: too many options in a question")
+
 // Ask sends all questions in one request; they run in parallel server-side.
 func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Response, error) {
 	body, err := json.Marshal(Request{Model: c.Model, State: state, Questions: qs})
@@ -164,6 +168,8 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Res
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
+		case resp.StatusCode == 422 && strings.Contains(string(data), "at most"):
+			return nil, fmt.Errorf("%w: %s", ErrTooManyOptions, truncate(string(data), 200))
 		case resp.StatusCode >= 300:
 			return nil, fmt.Errorf("jev: HTTP %d: %s", resp.StatusCode, truncate(string(data), 300))
 		}

@@ -37,15 +37,22 @@ var (
 	brw  *browser.Browser
 )
 
+var e2e = os.Getenv("BROJEV_E2E") == "1"
+
 func TestMain(m *testing.M) {
-	if os.Getenv("BROJEV_E2E") != "1" {
+	if !e2e {
 		fmt.Println("skipping browser tests; set BROJEV_E2E=1")
-		os.Exit(0)
+		os.Exit(m.Run())
 	}
 	dir, _ := os.MkdirTemp("", "brojev-agent-")
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/slow" {
+			// A shell that renders the real form only after 1.2 s, like an SPA boot.
+			fmt.Fprint(w, `<!doctype html><title>boot</title><p>Loading...</p><script>setTimeout(()=>{document.body.innerHTML=`+"`"+`<form onsubmit="event.preventDefault(); out.textContent='Welcome, '+n.value"><label>Name <input id=n name=n></label><button>Create account</button></form><p id=out></p>`+"`"+`},1200)</script>`)
+			return
+		}
 		if r.URL.Path == "/popup" {
 			fmt.Fprint(w, `<!doctype html><title>help</title><p>help center</p>`)
 			return
@@ -99,6 +106,9 @@ func (e *env) Switch(ctx context.Context, id string) (*page.Page, error) {
 }
 
 func newEnv(t *testing.T) *env {
+	if !e2e {
+		t.Skip("set BROJEV_E2E=1")
+	}
 	ctx := context.Background()
 	info, err := brw.Open(ctx, "about:blank")
 	if err != nil {
@@ -208,19 +218,15 @@ func TestLoopFillsSelectsSubmits(t *testing.T) {
 	if out.Status != "done" || out.Verified == nil || !*out.Verified {
 		t.Fatalf("outcome: %+v\nsteps: %+v", out, out.Steps)
 	}
-	if out.JevCalls != 4 || len(out.Steps) != 4 {
-		t.Fatalf("want 4 decisions, got %d (%+v)", out.JevCalls, out.Steps)
+	// The unambiguous Name/name pair is typed without a model call.
+	if out.JevCalls != 3 || len(out.Steps) != 4 {
+		t.Fatalf("want 3 decisions and 4 steps, got %d (%+v)", out.JevCalls, out.Steps)
 	}
-	if out.Steps[0].Text != "Ada" || out.Steps[1].Op != "SELECT" || !out.Steps[2].PageChanged {
+	if out.Steps[0].Text != "Ada" || out.Steps[0].Note != "prefill name" || out.Steps[1].Op != "SELECT" || !out.Steps[2].PageChanged {
 		t.Fatalf("steps: %+v", out.Steps)
 	}
 	// Heads are restricted by construction.
 	first := (*seen)[0]
-	for k := range first.Questions["type_text_target"].Criteria {
-		if !strings.HasSuffix(k, "|name") {
-			t.Fatalf("type head offers %q without a value and no helper", k)
-		}
-	}
 	if _, ok := first.Questions["select_target"].Criteria[index(&first, "combobox")+":1"]; ok {
 		t.Fatal("already-selected option must not be offered")
 	}
@@ -277,5 +283,31 @@ func TestMissingValueAsksClaude(t *testing.T) {
 	}
 	if out.Status != "blocked" {
 		t.Fatalf("outcome: %+v", out)
+	}
+}
+
+func TestWaitsForSlowShell(t *testing.T) {
+	e := newEnv(t)
+	j, seen := fakeJev(t, func(r *req) (string, string, float64) {
+		switch {
+		case strings.Contains(r.State.Page.Text, "Welcome, Ada"):
+			return "DONE", "", 0.9
+		case index(r, "Create account") == "":
+			return "BLOCKED", "", 0.9 // would be a false BLOCKED on the unrendered shell
+		case !strings.Contains(fmt.Sprint(r.State.Elements), "value:Ada"):
+			return "TYPE_TEXT", index(r, `"Name"`) + "|name", 0.9
+		default:
+			return "CLICK", index(r, "Create account"), 0.9
+		}
+	})
+	out, err := (&Runner{Jev: j, Env: e}).Run(context.Background(), Task{Goal: "Sign up as Ada", URL: base + "/slow", Values: map[string]string{"name": "Ada"}, Expect: "Welcome, Ada"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "done" {
+		t.Fatalf("outcome: %s %s steps=%+v", out.Status, out.Reason, out.Steps)
+	}
+	if first := (*seen)[0]; index(&first, "Create account") == "" {
+		t.Fatal("first decision was made on the unrendered shell")
 	}
 }
