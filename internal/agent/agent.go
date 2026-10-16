@@ -465,8 +465,12 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			for k := range sp.canvasTo.options {
 				dk[k] = true
 			}
-			if !ok || jev.Valid(ta, dk) != nil {
-				actErr = errors.New("invalid canvas drag destination answer")
+			if !ok {
+				actErr = errors.New("invalid canvas drag destination answer: missing")
+				break
+			}
+			if err := jev.Valid(ta, dk); err != nil {
+				actErr = errors.New("invalid canvas drag destination answer: " + err.Error())
 				break
 			}
 			tool := strings.ToLower(strings.Join(pressedTools(snap), "+"))
@@ -489,6 +493,10 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				// row would otherwise be flat and be discarded).
 				x1, x2 = min(from.x, to.x)-0.35*from.cw, max(from.x, to.x)+0.35*from.cw
 				y1, y2 = min(from.y, to.y)-0.35*from.ch, max(from.y, to.y)+0.35*from.ch
+			}
+			if idleTool(pressedTools(snap)) {
+				actErr = errors.New("canvas cells: no drawing tool is active (selection or hand): choose the shape tool in the toolbar first")
+				break
 			}
 			h.Tool = strings.Join(pressedTools(snap), "+")
 			for _, prev := range history {
@@ -564,6 +572,16 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				if actErr == nil {
 					step.Text, h.Text = text, text
 					res, actErr = p.Type(ctx, o.ref, text, page.TypeOptions{Submit: op == "TYPE_SUBMIT"})
+				}
+			}
+		}
+		if actErr == nil && op == "CANVAS_DRAG" {
+			// Apps may keep the drawing tool locked after a shape (Excalidraw's
+			// "keep tool active"): drop back to the idle tool so every shape
+			// needs an explicit tool choice, as on a fresh profile.
+			if again, err := p.Snapshot(ctx, decideSnap); err == nil {
+				if tools := pressedTools(again); len(tools) > 0 && !idleTool(tools) {
+					_, _ = p.Key(ctx, "Escape")
 				}
 			}
 		}
@@ -717,7 +735,7 @@ func (r *Runner) emit(s Step) {
 
 func retryable(err error) bool {
 	s := err.Error()
-	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context", "invalid canvas drag", "invalid drag destination", "canvas cells were already used"} {
+	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context", "invalid canvas drag", "invalid drag destination", "canvas cells were already used", "no drawing tool is active"} {
 		if strings.Contains(s, k) {
 			return true
 		}
@@ -914,6 +932,20 @@ func describeCell(h *head, key string) string {
 		}
 	}
 	return ""
+}
+
+// idleTool is true when the pressed toolbar buttons are all selection/hand.
+func idleTool(tools []string) bool {
+	if len(tools) == 0 {
+		return false
+	}
+	for _, t := range tools {
+		l := strings.ToLower(t)
+		if !strings.Contains(l, "selection") && !strings.Contains(l, "hand") {
+			return false
+		}
+	}
+	return true
 }
 
 // pressedTools lists toolbar buttons currently pressed (the active drawing tool).
