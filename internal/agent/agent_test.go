@@ -23,6 +23,7 @@ import (
 	"github.com/barockok/brojev/internal/browser"
 	"github.com/barockok/brojev/internal/chrome"
 	"github.com/barockok/brojev/internal/jev"
+	"github.com/barockok/brojev/internal/llm"
 	"github.com/barockok/brojev/internal/page"
 )
 
@@ -353,5 +354,45 @@ func TestFindReachesHiddenElement(t *testing.T) {
 	}
 	if first := (*seen)[0]; index(&first, "Archive thread 3") != "" {
 		t.Fatal("target was offered in the default view")
+	}
+}
+
+// The helper model proposes a phrase the code could not derive: the target
+// ("Resolve") shares nothing with the goal, and the recurring-word heuristic
+// cannot see it (it occurs once). Only the model's hint makes FIND reach it.
+func TestHelperHintReachesUnnamedTarget(t *testing.T) {
+	e := newEnv(t)
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		reply := `{"phrases": []}`
+		if strings.Contains(string(b), "hidden_names") {
+			reply = `{"phrases": ["thread 3"]}`
+		}
+		json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": reply}}}})
+	}))
+	defer hs.Close()
+	j, _ := fakeJev(t, func(r *req) (string, string, float64) {
+		if strings.HasPrefix(r.State.Page.Title, "archived") {
+			return "DONE", "", 0.9
+		}
+		if q, ok := r.Questions["find_phrase"]; ok {
+			for k, c := range q.Criteria {
+				if m, ok := c.(map[string]any); ok && m["phrase"] == "thread 3" {
+					return "FIND", k, 0.9
+				}
+			}
+		}
+		return "CLICK", index(r, "Archive thread 3"), 0.9
+	})
+	run := &Runner{Jev: j, Env: e, LLM: &llm.Client{Key: "k", BaseURL: hs.URL, Model: "m", HTTP: hs.Client()}}
+	out, err := run.Run(context.Background(), Task{Goal: "Open the old conversation", URL: base + "/big"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "done" || out.Title != "archived 3" || out.Steps[0].Op != "FIND" || out.Steps[0].Target != "thread 3" {
+		t.Fatalf("outcome: %s %s title=%q steps=%+v", out.Status, out.Reason, out.Title, out.Steps)
+	}
+	if out.HelperMS < 0 {
+		t.Fatal("helper time not accounted")
 	}
 }

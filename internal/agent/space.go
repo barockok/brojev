@@ -289,7 +289,7 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int, w window) *spa
 
 	if len(v.hidden) > 0 || v.pages > 1 {
 		if w.query == "" && len(v.hidden) > 0 {
-			if crit, opts := findCandidates(t, v.hidden); len(opts) > 0 {
+			if crit, opts := findCandidates(t, v.hidden, w.hints); len(opts) > 0 {
 				add("FIND", &head{qid: "find_phrase", options: opts, criteria: crit, rules: ruleFind},
 					fmt.Sprintf("Offer only the elements whose name contains a phrase: %d elements on the page are not currently offered", len(v.hidden)))
 			}
@@ -336,6 +336,9 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int, w window) *spa
 type window struct {
 	page  int
 	query string
+	// hints are extra FIND phrases proposed by the helper model. Each is
+	// validated against the hidden elements before Jev sees it.
+	hints []string
 }
 
 // view is the outcome of pick: the offered elements, the rest, and paging.
@@ -471,7 +474,7 @@ func pick(all []page.Element, t Task, limit int, w window) view {
 
 // findCandidates proposes phrases for FIND: quoted goal text, provided
 // values and goal words that name at least one element not currently offered.
-func findCandidates(t Task, hidden []page.Element) (map[string]any, map[string]option) {
+func findCandidates(t Task, hidden []page.Element, hints []string) (map[string]any, map[string]option) {
 	var cands []string
 	seen := map[string]bool{}
 	add := func(c string) {
@@ -483,6 +486,9 @@ func findCandidates(t Task, hidden []page.Element) (map[string]any, map[string]o
 	}
 	for _, q := range quoted(t.Goal) {
 		add(q)
+	}
+	for _, h := range hints {
+		add(h)
 	}
 	keys := make([]string, 0, len(t.Values))
 	for k := range t.Values {

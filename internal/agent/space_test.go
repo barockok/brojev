@@ -181,3 +181,22 @@ func TestSmallPageHasNoNavigationOps(t *testing.T) {
 		t.Fatalf("ops: %v", sp.ops)
 	}
 }
+
+func TestFindCandidatesTakeValidatedHints(t *testing.T) {
+	hidden := []page.Element{
+		{Ref: "e1", Name: "Quarterly report"}, {Ref: "e2", Name: "Invoice 2026"}, {Ref: "e3", Name: "Invoice 2025"},
+	}
+	crit, opts := findCandidates(Task{Goal: "Open the bill"}, hidden, []string{"invoice", "nonexistent phrase"})
+	var got []string
+	for _, o := range opts {
+		got = append(got, o.value)
+	}
+	if len(opts) != 1 || got[0] != "invoice" {
+		t.Fatalf("want only the validated hint, got %v", got)
+	}
+	for k := range opts {
+		if n := crit[k].(map[string]any)["matching_elements_not_offered"]; n != 2 {
+			t.Fatalf("match count %v", n)
+		}
+	}
+}
