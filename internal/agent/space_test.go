@@ -200,3 +200,23 @@ func TestFindCandidatesTakeValidatedHints(t *testing.T) {
 		}
 	}
 }
+
+func TestUsedCanvasCellsAreNotOfferedAgain(t *testing.T) {
+	canvas := page.Element{Ref: "e1", Role: "canvas", Tag: "canvas", InView: true, Rect: [4]float64{0, 0, 1200, 750}}
+	s := &page.Snapshot{Viewport: [2]float64{1280, 800}, Elements: []page.Element{canvas}}
+	used := usedCells([]hist{{Kind: "CANVAS_DRAG", Action: "drag on canvas r2c2 to r4c3"}})
+	for _, k := range []string{"r2c2", "r3c2", "r4c3", "r3c3"} {
+		if !used[k] {
+			t.Fatalf("%s should be used: %v", k, used)
+		}
+	}
+	sp := buildSpace(s, Task{Goal: "draw"}, false, maxOptions, window{used: used})
+	for k := range sp.heads["CANVAS_DRAG"].options {
+		if used[k] {
+			t.Fatalf("used cell %s offered", k)
+		}
+	}
+	if len(sp.heads["CANVAS_DRAG"].options) != 30-6 {
+		t.Fatalf("free cells: %d", len(sp.heads["CANVAS_DRAG"].options))
+	}
+}

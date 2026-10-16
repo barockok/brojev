@@ -157,6 +157,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 	loadingWaited := time.Duration(0)
 	limit := maxOptions
 	win, navMoves := window{}, 0
+	invalid := 0
 	hintCache := map[uint64][]string{}
 	typed := map[string]bool{}
 
@@ -278,6 +279,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				w.hints = hs
 			}
 		}
+		w.used = usedCells(history)
 		sp := buildSpace(snap, t, r.LLM != nil, limit, w)
 		state := map[string]any{
 			"page":           map[string]any{"url": snap.URL, "title": snap.Title, "text": snap.Text},
@@ -317,6 +319,10 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			return finish(p, "error", "jev: no operation answer")
 		}
 		if err := jev.Valid(opAns, sp.opKeys()); err != nil {
+			if invalid++; invalid <= 2 {
+				decisions-- // the API occasionally breaks its own contract: ask again
+				continue
+			}
 			return finish(p, "error", "jev: invalid operation answer: "+err.Error())
 		}
 		op := opAns.Choice
@@ -332,6 +338,10 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				keys[k] = true
 			}
 			if err := jev.Valid(ta, keys); err != nil {
+				if invalid++; invalid <= 2 {
+					decisions--
+					continue
+				}
 				return finish(p, "error", "jev: invalid "+head.qid+": "+err.Error())
 			}
 			target = ta.Choice
@@ -459,10 +469,12 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				actErr = errors.New("invalid canvas drag destination answer")
 				break
 			}
+			tool := strings.ToLower(strings.Join(pressedTools(snap), "+"))
+			isLine := strings.Contains(tool, "arrow") || strings.Contains(tool, "line")
 			dest := ta.Choice
-			if dest == target {
-				// Start and end are chosen in parallel, so they can collide:
-				// take the end Jev liked second best.
+			if dest == target && isLine {
+				// A line needs two different ends, but both are chosen in
+				// parallel: take the end Jev liked second best.
 				if dest = altChoice(ta.Probabilities, target); dest == "" {
 					actErr = errors.New("canvas drag start equals end")
 					break
@@ -471,17 +483,26 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			to := sp.canvasTo.options[dest]
 			step.Target = target + " -> " + dest
 			h.Action = "drag on canvas " + target + " to " + dest
+			x1, y1, x2, y2 := from.x, from.y, to.x, to.y
+			if !isLine {
+				// Shapes span the whole box of both cells (a drag along one
+				// row would otherwise be flat and be discarded).
+				x1, x2 = min(from.x, to.x)-0.35*from.cw, max(from.x, to.x)+0.35*from.cw
+				y1, y2 = min(from.y, to.y)-0.35*from.ch, max(from.y, to.y)+0.35*from.ch
+			}
 			h.Tool = strings.Join(pressedTools(snap), "+")
 			for _, prev := range history {
-				if prev.Error == "" && prev.Action == h.Action && prev.Tool == h.Tool {
-					actErr = errors.New("already drew this with this tool: choose another tool or different cells")
+				if prev.Error == "" && prev.Action == h.Action {
+					// Same cells again stacks shapes on top of each other
+					// whatever the tool: a drawing needs distinct places.
+					actErr = errors.New("these canvas cells were already used (" + prev.Tool + "): choose different cells for this shape")
 					break
 				}
 			}
 			if actErr != nil {
 				break
 			}
-			res, actErr = p.DragXY(ctx, from.x, from.y, to.x, to.y)
+			res, actErr = p.DragXY(ctx, x1, y1, x2, y2)
 		case "DIALOG_PROMPT":
 			o := sp.heads[op].options[target]
 			step.Target, step.Text = o.label, o.value
@@ -696,7 +717,7 @@ func (r *Runner) emit(s Step) {
 
 func retryable(err error) bool {
 	s := err.Error()
-	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context", "invalid canvas drag", "invalid drag destination", "already drew this"} {
+	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context", "invalid canvas drag", "invalid drag destination", "canvas cells were already used"} {
 		if strings.Contains(s, k) {
 			return true
 		}

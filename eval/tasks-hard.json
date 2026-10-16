@@ -132,16 +132,24 @@
   "name": "excalidraw-rect",
   "url": "https://excalidraw.com/",
   "goal": "Pick the rectangle tool and draw one rectangle on the canvas.",
-  "reset": "localStorage.clear(); sessionStorage.clear()",
-  "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted);return e.some(x=>x.type==='rectangle')})()",
+  "reset": "localStorage.clear(); sessionStorage.clear(); sessionStorage.setItem('bj_t0', String(Date.now()))",
+  "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted&&x.updated>Number(sessionStorage.getItem('bj_t0')));return e.some(x=>x.type==='rectangle')})()",
   "maxSteps": 15
  },
  {
   "name": "excalidraw-diagram",
   "url": "https://excalidraw.com/",
   "goal": "Draw a rectangle on the left side of the canvas, an ellipse on the right side, and an arrow from the rectangle to the ellipse.",
-  "reset": "localStorage.clear(); sessionStorage.clear()",
-  "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted);return e.some(x=>x.type==='rectangle') && e.some(x=>x.type==='ellipse') && e.some(x=>x.type==='arrow')})()",
+  "reset": "localStorage.clear(); sessionStorage.clear(); sessionStorage.setItem('bj_t0', String(Date.now()))",
+  "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted&&x.updated>Number(sessionStorage.getItem('bj_t0')));return e.some(x=>x.type==='rectangle') && e.some(x=>x.type==='ellipse') && e.some(x=>x.type==='arrow')})()",
+  "maxSteps": 30
+ },
+ {
+  "name": "excalidraw-rocket",
+  "url": "https://excalidraw.com/",
+  "goal": "Draw a simple rocket on the canvas: a tall rectangle for the body, a diamond for the nose cone on top of it, and a small ellipse for the window.",
+  "reset": "localStorage.clear(); sessionStorage.clear(); sessionStorage.setItem('bj_t0', String(Date.now()))",
+  "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted&&x.updated>Number(sessionStorage.getItem('bj_t0')));if(!['rectangle','diamond','ellipse'].every(ty=>e.some(x=>x.type===ty)))return false;const k=new Set(e.map(x=>[x.x,x.y,x.width,x.height].map(v=>Math.round(v/10)).join()));return k.size===e.length})()",
   "maxSteps": 30
  }
 ]

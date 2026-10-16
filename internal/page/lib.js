@@ -2,7 +2,7 @@
 // scripts cannot see or tamper with it. Element refs are stable integer ids
 // held through WeakRefs: a ref stays valid while its node stays connected.
 (() => {
-  const VERSION = 9;
+  const VERSION = 10;
   if (globalThis.__bj && globalThis.__bj.v === VERSION) return;
 
   const ids = new WeakMap();
@@ -300,9 +300,15 @@
         let free = "";
         for (let rr = 0; rr < 5; rr++) {
           for (let cc = 0; cc < 6; cc++) {
-            const x = r.left + (r.width * (cc + 0.5)) / 6, y = r.top + (r.height * (rr + 0.5)) / 5;
-            const hit = x >= 0 && y >= 0 && x < vw && y < vh ? deepHit(x, y) : null;
-            free += hit && hit.localName === "canvas" ? "1" : "0";
+            const cx = r.left + (r.width * (cc + 0.5)) / 6, cy = r.top + (r.height * (rr + 0.5)) / 5;
+            const dx = (r.width / 6) * 0.35, dy = (r.height / 5) * 0.35;
+            // The centre and the four corners a shape drag may start from must all reach the canvas.
+            let ok = true;
+            for (const [px, py] of [[cx, cy], [cx - dx, cy - dy], [cx + dx, cy - dy], [cx - dx, cy + dy], [cx + dx, cy + dy]]) {
+              const hit = px >= 0 && py >= 0 && px < vw && py < vh ? deepHit(px, py) : null;
+              if (!(hit && hit.localName === "canvas")) { ok = false; break; }
+            }
+            free += ok ? "1" : "0";
           }
         }
         item.free = free;

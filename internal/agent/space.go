@@ -20,7 +20,8 @@ type option struct {
 	current    string
 	key        string  // PRESS_KEY
 	generate   bool    // TYPE_TEXT: ask the helper for the text
-	x, y       float64 // canvas cells: viewport position
+	x, y       float64 // canvas cells: viewport position (center)
+	cw, ch     float64 // canvas cells: cell size
 }
 
 type head struct {
@@ -176,11 +177,14 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int, w window) *spa
 			if !haveCanvas && e.InView {
 				haveCanvas = true
 				for _, c := range canvasCells(e) {
-					canvasClick.options[c.key] = option{label: lbl, x: c.x, y: c.y}
+					if w.used[c.key] {
+						continue
+					}
+					canvasClick.options[c.key] = option{label: lbl, x: c.x, y: c.y, cw: c.w, ch: c.h}
 					canvasClick.criteria[c.key] = c.desc
-					canvasFrom.options[c.key] = option{label: lbl, x: c.x, y: c.y}
+					canvasFrom.options[c.key] = option{label: lbl, x: c.x, y: c.y, cw: c.w, ch: c.h}
 					canvasFrom.criteria[c.key] = c.desc
-					canvasTo.options[c.key] = option{label: lbl, x: c.x, y: c.y}
+					canvasTo.options[c.key] = option{label: lbl, x: c.x, y: c.y, cw: c.w, ch: c.h}
 					canvasTo.criteria[c.key] = c.desc
 				}
 			}
@@ -339,6 +343,9 @@ type window struct {
 	// hints are extra FIND phrases proposed by the helper model. Each is
 	// validated against the hidden elements before Jev sees it.
 	hints []string
+	// used are canvas cells already covered by earlier drawing; they are not
+	// offered again, so shapes cannot be stacked on each other.
+	used map[string]bool
 }
 
 // view is the outcome of pick: the offered elements, the rest, and paging.
@@ -646,7 +653,7 @@ PRESS_KEY Enter submits a field when no submit button is offered; Escape closes 
 Sliders and number inputs are set with TYPE_TEXT using the number from the goal; arrow keys only work on a focused slider.
 If the element you need is not in the offered list but the page has more elements, use FIND with a phrase from the goal, or MORE_OPTIONS to see the next group.
 On drawing canvases, CANVAS_DRAG draws with the ACTIVE tool (the pressed toolbar button): CLICK the needed tool first, then drag.
-After each drawn item the tool may reset: re-select it before the next one. Never repeat an identical canvas action.
+After each drawn item the tool may reset: re-select it before the next one. Every shape needs its own cells (see canvas_drawn): to compose an object, place its parts apart or one inside another, never on the same cells.
 HOVER only to reveal menus that open on hover. UPLOAD attaches the provided files.
 WAIT only when the needed control is absent or disabled, or submitted results are still loading.
 Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.
@@ -667,8 +674,8 @@ const ruleUpload = `Choose the file field or upload button that the files belong
 const ruleDragFrom = `Choose the element to pick up and drag.`
 const ruleDragTo = `Choose the element to drop the dragged element onto. It must differ from the dragged element.`
 const ruleCanvasClick = `Choose the canvas cell to click. Cells are a grid over the drawing surface; use the row/column and position names to place things where the goal says.`
-const ruleCanvasFrom = `Choose the canvas cell where the drag starts (for a shape: its first corner; for a line or arrow: its start). The active tool is whatever was last chosen in the toolbar.`
-const ruleCanvasTo = `Choose the canvas cell where the drag ends (a shape's opposite corner, a line's end). It must differ from the start cell and be far enough away to make a visible shape.`
+const ruleCanvasFrom = `Choose the canvas cell where the drag starts (for a shape: its first corner; for a line or arrow: its start). The active tool is whatever was last chosen in the toolbar. For boxes, ellipses and diamonds the shape fills both cells and everything between, so the same cell for both ends is fine.`
+const ruleCanvasTo = `Choose the canvas cell where the drag ends (a shape's opposite corner, a line's end). For lines and arrows it must differ from the start cell; boxes may use the same cell.`
 const ruleFind = `Choose the phrase most likely to appear in the name of the element the goal needs next. The examples show names that contain it.`
 const rulePrompt = `Choose the text to type into the prompt dialog. Never invent text.`
 const ruleTypeSubmit = `Same choices as typing, but Enter is pressed afterwards. Choose it when the goal needs the entry submitted (add an item, search, send).
@@ -739,6 +746,7 @@ func goalNumbers(goal string) []string {
 type cell struct {
 	key  string
 	x, y float64
+	w, h float64
 	desc map[string]any
 }
 
@@ -759,10 +767,37 @@ func canvasCells(e page.Element) []cell {
 				continue // under a toolbar or panel
 			}
 			key := fmt.Sprintf("r%dc%d", r+1, c+1)
-			out = append(out, cell{key: key, x: x, y: y, desc: map[string]any{
+			out = append(out, cell{key: key, x: x, y: y, w: w / cols, h: h / rows, desc: map[string]any{
 				"row": r + 1, "col": c + 1, "position": rowNames[r] + " " + colNames[c],
 			}})
 		}
 	}
 	return out
+}
+
+var cellRe = regexp.MustCompile(`r(\d+)c(\d+)`)
+
+// usedCells returns the canvas cells covered by earlier drags: the box between
+// each drag's start and end cell.
+func usedCells(h []hist) map[string]bool {
+	used := map[string]bool{}
+	for _, x := range h {
+		if x.Kind != "CANVAS_DRAG" || x.Error != "" {
+			continue
+		}
+		m := cellRe.FindAllStringSubmatch(x.Action, -1)
+		if len(m) != 2 {
+			continue
+		}
+		r1, _ := strconv.Atoi(m[0][1])
+		c1, _ := strconv.Atoi(m[0][2])
+		r2, _ := strconv.Atoi(m[1][1])
+		c2, _ := strconv.Atoi(m[1][2])
+		for r := min(r1, r2); r <= max(r1, r2); r++ {
+			for c := min(c1, c2); c <= max(c1, c2); c++ {
+				used[fmt.Sprintf("r%dc%d", r, c)] = true
+			}
+		}
+	}
+	return used
 }
