@@ -2,7 +2,7 @@
 // scripts cannot see or tamper with it. Element refs are stable integer ids
 // held through WeakRefs: a ref stays valid while its node stays connected.
 (() => {
-  const VERSION = 6;
+  const VERSION = 7;
   if (globalThis.__bj && globalThis.__bj.v === VERSION) return;
 
   const ids = new WeakMap();
@@ -141,6 +141,16 @@
       if (img) return clean(img.getAttribute("alt") || img.getAttribute("aria-label") || img.textContent);
     }
     if (el.title) return clean(el.title);
+    if (toggle(el)) {
+      // Unlabelled toggle (a todo-list row): use the neighbouring label or the row text.
+      const sib = el.nextElementSibling || el.previousElementSibling;
+      if (sib && sib.localName === "label") {
+        const s = clean(textOf(sib));
+        if (s) return s;
+      }
+      const row = el.closest("li,tr,[role=row],[role=listitem],[role=option]");
+      if (row) return clean(textOf(row));
+    }
     return "";
   };
 
@@ -181,8 +191,22 @@
     return s;
   };
 
+  // Custom checkboxes/radios often hide the real input (opacity 0 or zero
+  // size) and draw the control with its label. They still receive clicks at
+  // the input's box or through the label, so they count as visible.
+  const toggle = (el) => el.localName === "input" && ((el.type || "").toLowerCase() === "checkbox" || (el.type || "").toLowerCase() === "radio");
   const visible = (el) => {
     const r = el.getBoundingClientRect();
+    if (toggle(el)) {
+      if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true })) return null;
+      if (r.width > 0 && r.height > 0) return r;
+      const l = el.labels && el.labels[0];
+      if (l) {
+        const lr = l.getBoundingClientRect();
+        if (lr.width > 0 && lr.height > 0 && (!l.checkVisibility || l.checkVisibility({ opacityProperty: true, visibilityProperty: true }))) return lr;
+      }
+      return null;
+    }
     if (r.width <= 0 || r.height <= 0) return null;
     if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return null;
     return r;
@@ -362,15 +386,15 @@
   const prep = async (id, opts) => {
     const el = get(id);
     const need = opts || {};
-    let r = el.getBoundingClientRect();
+    let r = visible(el) || el.getBoundingClientRect();
     if (r.top < 0 || r.left < 0 || r.bottom > innerHeight || r.right > innerWidth) {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
     }
     // Stable: same box across a frame, so an animating target is not missed.
     for (let i = 0; i < 3; i++) {
-      r = el.getBoundingClientRect();
+      r = visible(el) || el.getBoundingClientRect();
       await frame();
-      const r2 = el.getBoundingClientRect();
+      const r2 = visible(el) || el.getBoundingClientRect();
       if (r.x === r2.x && r.y === r2.y && r.width === r2.width && r.height === r2.height) break;
       r = r2;
     }

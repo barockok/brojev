@@ -220,6 +220,14 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 					typ.criteria[key] = map[string]any{"element": lbl, "current_value": cur, "value_name": k, "value": v}
 				}
 			}
+			if e.Type == "range" || e.Type == "number" {
+				// Sliders and spinners take a number: offer those named in the goal.
+				for _, n := range goalNumbers(t.Goal) {
+					key := i + "|n:" + n
+					typ.options[key] = option{ref: e.Ref, label: lbl, value: n, current: cur}
+					typ.criteria[key] = map[string]any{"element": lbl, "current_value": cur, "value": n, "source": "number in the goal"}
+				}
+			}
 			if helper {
 				key := i + "|other"
 				if !pairs {
@@ -428,7 +436,7 @@ a target for that operation; another question decides which operation to execute
 
 const ruleClick = `Do not click a field that already shows the requested value unless it must be opened. For dates, choose the cell whose label names the exact requested date.`
 const ruleHover = `Choose the element whose hover menu or tooltip is needed for the goal.`
-const ruleType = `Choose the field to fill next. Options pair a field with a provided value; pick the pair whose value belongs in that field.
+const ruleType = `Sliders and number inputs: choose the option whose value is the number the goal asks for, not a key press. Choose the field to fill next. Options pair a field with a provided value; pick the pair whose value belongs in that field.
 Choose the "written from the goal" option only when no provided value fits. Do not choose a field that already contains the requested value.`
 const ruleSelect = `Choose the field and option the goal requires. Options already selected are not offered.`
 const ruleUpload = `Choose the file field or upload button that the files belong to.`
@@ -480,6 +488,21 @@ func goalKeys(goal string) []string {
 	for _, w := range strings.FieldsFunc(strings.ToLower(goal), func(r rune) bool { return !unicode.IsLetter(r) }) {
 		if k, ok := namedKeys[w]; ok {
 			add(k)
+		}
+	}
+	return out
+}
+
+var numberRe = regexp.MustCompile(`(?:^|[^\w.])(-?\d+(?:\.\d+)?)(?:$|[^\w.]|\.(?:\s|$))`)
+
+// goalNumbers returns the distinct numbers written in the goal, in order.
+func goalNumbers(goal string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range numberRe.FindAllStringSubmatch(goal, -1) {
+		if !seen[m[1]] && len(out) < 8 {
+			seen[m[1]] = true
+			out = append(out, m[1])
 		}
 	}
 	return out
