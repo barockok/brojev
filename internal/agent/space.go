@@ -18,8 +18,9 @@ type option struct {
 	option     string // SELECT: option label
 	value      string // TYPE_TEXT: provided value
 	current    string
-	key        string // PRESS_KEY
-	generate   bool   // TYPE_TEXT: ask the helper for the text
+	key        string  // PRESS_KEY
+	generate   bool    // TYPE_TEXT: ask the helper for the text
+	x, y       float64 // canvas cells: viewport position
 }
 
 type head struct {
@@ -30,12 +31,13 @@ type head struct {
 }
 
 type space struct {
-	table []map[string]any
-	heads map[string]*head
-	ops   map[string]string // operation -> description
-	drop  *head             // DRAG destination head
-	keys  []string          // provided value keys, in order
-	refs  map[string]string // index -> label (for messages)
+	table    []map[string]any
+	heads    map[string]*head
+	ops      map[string]string // operation -> description
+	drop     *head             // DRAG destination head
+	canvasTo *head             // CANVAS_DRAG destination head
+	keys     []string          // provided value keys, in order
+	refs     map[string]string // index -> label (for messages)
 }
 
 const maxOffscreen = 60
@@ -137,6 +139,10 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 	dragFrom := &head{qid: "drag_source", options: map[string]option{}, criteria: map[string]any{}, rules: ruleDragFrom}
 	dragTo := &head{qid: "drag_destination", options: map[string]option{}, criteria: map[string]any{}, rules: ruleDragTo}
 	draggable := false
+	canvasClick := &head{qid: "canvas_click_cell", options: map[string]option{}, criteria: map[string]any{}, rules: ruleCanvasClick}
+	canvasFrom := &head{qid: "canvas_drag_from", options: map[string]option{}, criteria: map[string]any{}, rules: ruleCanvasFrom}
+	canvasTo := &head{qid: "canvas_drag_to", options: map[string]option{}, criteria: map[string]any{}, rules: ruleCanvasTo}
+	haveCanvas := false
 
 	for n, e := range els {
 		i := strconv.Itoa(n + 1)
@@ -172,6 +178,20 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 		disabled := has(e.States, "disabled")
 		if disabled {
 			continue
+		}
+		if e.Role == "canvas" {
+			if !haveCanvas && e.InView {
+				haveCanvas = true
+				for _, c := range canvasCells(e) {
+					canvasClick.options[c.key] = option{label: lbl, x: c.x, y: c.y}
+					canvasClick.criteria[c.key] = c.desc
+					canvasFrom.options[c.key] = option{label: lbl, x: c.x, y: c.y}
+					canvasFrom.criteria[c.key] = c.desc
+					canvasTo.options[c.key] = option{label: lbl, x: c.x, y: c.y}
+					canvasTo.criteria[c.key] = c.desc
+				}
+			}
+			continue // clicked by position, never by element
 		}
 		switch {
 		case e.Role == "file":
@@ -261,6 +281,17 @@ func buildSpace(s *page.Snapshot, t Task, helper bool, limit int) *space {
 		sp.heads["DRAG"] = dragFrom
 		sp.drop = dragTo
 		sp.ops["DRAG"] = "Drag one element and drop it onto another"
+	}
+
+	if haveCanvas {
+		add("CANVAS_CLICK", canvasClick, "Click a position on the drawing canvas (place a shape, pick a point, select something drawn)")
+		if len(canvasClick.options) > 1 {
+			// DRAG's destination head is shared with element drags, so canvas
+			// drags get their own two-head pair.
+			sp.heads["CANVAS_DRAG"] = canvasFrom
+			sp.canvasTo = canvasTo
+			sp.ops["CANVAS_DRAG"] = "Press at one canvas position and drag to another (draw a shape, line or arrow with the active tool, move something)"
+		}
 	}
 
 	keys := &head{qid: "key_choice", options: map[string]option{}, criteria: map[string]any{}, rules: ruleKey}
@@ -402,6 +433,12 @@ func (sp *space) questions(t Task) map[string]jev.Choice {
 			Criteria:     h.criteria,
 		}
 	}
+	if sp.canvasTo != nil {
+		qs[sp.canvasTo.qid] = jev.Choice{
+			Instructions: with(map[string]any{"operation": "CANVAS_DRAG", "rules": []string{ruleTarget, sp.canvasTo.rules}}),
+			Criteria:     sp.canvasTo.criteria,
+		}
+	}
 	if sp.drop != nil {
 		qs[sp.drop.qid] = jev.Choice{
 			Instructions: with(map[string]any{"operation": "DRAG", "rules": []string{ruleTarget, sp.drop.rules}}),
@@ -423,6 +460,8 @@ Submit populated search fields before opening a result; a populated field alone 
 If Search/Submit is visible and the required fields are ready, CLICK it immediately.
 Offscreen elements can be used directly; they scroll into view automatically. SCROLL only to find content that is not listed.
 PRESS_KEY Enter submits a field when no submit button is offered; Escape closes popups.
+On drawing canvases, CANVAS_DRAG draws with the ACTIVE tool (the pressed toolbar button): CLICK the needed tool first, then drag.
+After each drawn item the tool may reset: re-select it before the next one. Never repeat an identical canvas action.
 HOVER only to reveal menus that open on hover. UPLOAD attaches the provided files.
 WAIT only when the needed control is absent or disabled, or submitted results are still loading.
 Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.
@@ -442,6 +481,9 @@ const ruleSelect = `Choose the field and option the goal requires. Options alrea
 const ruleUpload = `Choose the file field or upload button that the files belong to.`
 const ruleDragFrom = `Choose the element to pick up and drag.`
 const ruleDragTo = `Choose the element to drop the dragged element onto. It must differ from the dragged element.`
+const ruleCanvasClick = `Choose the canvas cell to click. Cells are a grid over the drawing surface; use the row/column and position names to place things where the goal says.`
+const ruleCanvasFrom = `Choose the canvas cell where the drag starts (for a shape: its first corner; for a line or arrow: its start). The active tool is whatever was last chosen in the toolbar.`
+const ruleCanvasTo = `Choose the canvas cell where the drag ends (a shape's opposite corner, a line's end). It must differ from the start cell and be far enough away to make a visible shape.`
 const rulePrompt = `Choose the text to type into the prompt dialog. Never invent text.`
 const ruleTypeSubmit = `Same choices as typing, but Enter is pressed afterwards. Choose it when the goal needs the entry submitted (add an item, search, send).
 Do not choose a field that already contains the requested value.`
@@ -503,6 +545,37 @@ func goalNumbers(goal string) []string {
 		if !seen[m[1]] && len(out) < 8 {
 			seen[m[1]] = true
 			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+type cell struct {
+	key  string
+	x, y float64
+	desc map[string]any
+}
+
+var rowNames = []string{"top", "upper", "middle", "lower", "bottom"}
+var colNames = []string{"far-left", "left", "center-left", "center-right", "right", "far-right"}
+
+// canvasCells lays a grid over the visible part of a canvas so Jev can pick
+// positions by name instead of pixel coordinates (it cannot do arithmetic).
+func canvasCells(e page.Element) []cell {
+	const rows, cols = 5, 6
+	x0, y0, w, h := e.Rect[0], e.Rect[1], e.Rect[2], e.Rect[3]
+	var out []cell
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			x := x0 + w*(float64(c)+0.5)/cols
+			y := y0 + h*(float64(r)+0.5)/rows
+			if len(e.Free) == rows*cols && e.Free[r*cols+c] != '1' {
+				continue // under a toolbar or panel
+			}
+			key := fmt.Sprintf("r%dc%d", r+1, c+1)
+			out = append(out, cell{key: key, x: x, y: y, desc: map[string]any{
+				"row": r + 1, "col": c + 1, "position": rowNames[r] + " " + colNames[c],
+			}})
 		}
 	}
 	return out

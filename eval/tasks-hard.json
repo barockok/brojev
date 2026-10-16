@@ -1,131 +1,147 @@
 [
  {
- "name": "sd-checkout",
- "url": "https://www.saucedemo.com/",
- "goal": "Log in, add the Sauce Labs Backpack to the cart, open the cart, check out with the provided details, continue, and finish the order.",
- "values": {
-  "username": "standard_user",
-  "password": "secret_sauce",
-  "first name": "Ada",
-  "last name": "Lovelace",
-  "zip": "12345"
- },
- "expect": "Thank you for your order!",
- "maxSteps": 30
- },
- {
- "name": "sd-sort-price",
- "url": "https://www.saucedemo.com/",
- "goal": "Log in, then sort the products by price from low to high.",
- "values": {
-  "username": "standard_user",
-  "password": "secret_sauce"
- },
- "expect": "Price (low to high)"
+  "name": "sd-checkout",
+  "url": "https://www.saucedemo.com/",
+  "goal": "Log in, add the Sauce Labs Backpack to the cart, open the cart, check out with the provided details, continue, and finish the order.",
+  "values": {
+   "username": "standard_user",
+   "password": "secret_sauce",
+   "first name": "Ada",
+   "last name": "Lovelace",
+   "zip": "12345"
+  },
+  "expect": "Thank you for your order!",
+  "maxSteps": 30
  },
  {
- "name": "sd-bad-login",
- "url": "https://www.saucedemo.com/",
- "goal": "Try to log in with the provided locked-out user and report the error.",
- "values": {
-  "username": "locked_out_user",
-  "password": "secret_sauce"
- },
- "expect": "this user has been locked out"
- },
- {
- "name": "ti-iframe-editor",
- "url": "https://the-internet.herokuapp.com/iframe",
- "goal": "Replace the text in the rich text editor with the provided text.",
- "values": {
-  "text": "Hello from brojev"
- },
- "expect": "Hello from brojev"
+  "name": "sd-sort-price",
+  "url": "https://www.saucedemo.com/",
+  "goal": "Log in, then sort the products by price from low to high.",
+  "values": {
+   "username": "standard_user",
+   "password": "secret_sauce"
+  },
+  "expect": "Price (low to high)"
  },
  {
- "name": "ti-add-remove",
- "url": "https://the-internet.herokuapp.com/add_remove_elements/",
- "goal": "Add three elements, then delete one of them so that exactly two Delete buttons remain.",
- "expect": "Delete"
+  "name": "sd-bad-login",
+  "url": "https://www.saucedemo.com/",
+  "goal": "Try to log in with the provided locked-out user and report the error.",
+  "values": {
+   "username": "locked_out_user",
+   "password": "secret_sauce"
+  },
+  "expect": "this user has been locked out"
  },
  {
- "name": "ti-dynamic-controls",
- "url": "https://the-internet.herokuapp.com/dynamic_controls",
- "goal": "Enable the text input, then type the provided text into it.",
- "values": {
-  "text": "brojev"
- },
- "expect": "It's enabled!"
- },
- {
- "name": "ti-jquery-menu",
- "url": "https://the-internet.herokuapp.com/jqueryui/menu",
- "goal": "Open the Enabled menu, then its Downloads submenu, then choose the PDF item."
+  "name": "ti-iframe-editor",
+  "url": "https://the-internet.herokuapp.com/iframe",
+  "goal": "Replace the text in the rich text editor with the provided text.",
+  "values": {
+   "text": "Hello from brojev"
+  },
+  "expect": "Hello from brojev"
  },
  {
- "name": "ti-slider",
- "url": "https://the-internet.herokuapp.com/horizontal_slider",
- "goal": "Set the horizontal slider to 4.",
- "expect": "4"
+  "name": "ti-add-remove",
+  "url": "https://the-internet.herokuapp.com/add_remove_elements/",
+  "goal": "Add three elements, then delete one of them so that exactly two Delete buttons remain.",
+  "expect": "Delete"
  },
  {
- "name": "ti-window",
- "url": "https://the-internet.herokuapp.com/windows",
- "goal": "Click the link that opens a new window and stop when the new window is showing.",
- "expect": "New Window"
+  "name": "ti-dynamic-controls",
+  "url": "https://the-internet.herokuapp.com/dynamic_controls",
+  "goal": "Enable the text input, then type the provided text into it.",
+  "values": {
+   "text": "brojev"
+  },
+  "expect": "It's enabled!"
  },
  {
- "name": "ti-js-prompt",
- "url": "https://the-internet.herokuapp.com/javascript_alerts",
- "goal": "Click the 'Click for JS Prompt' button, enter the provided text in the prompt, and accept it.",
- "values": {
-  "text": "brojev"
- },
- "expect": "You entered: brojev"
+  "name": "ti-jquery-menu",
+  "url": "https://the-internet.herokuapp.com/jqueryui/menu",
+  "goal": "Open the Enabled menu, then its Downloads submenu, then choose the PDF item."
  },
  {
- "name": "ti-large-dom",
- "url": "https://the-internet.herokuapp.com/large",
- "goal": "Scroll down to the bottom of the table and stop when the last row (50.50) is visible.",
- "expect": "50.50"
+  "name": "ti-slider",
+  "url": "https://the-internet.herokuapp.com/horizontal_slider",
+  "goal": "Set the horizontal slider to 4.",
+  "expect": "4"
  },
  {
- "name": "ti-infinite-scroll",
- "url": "https://the-internet.herokuapp.com/infinite_scroll",
- "goal": "Scroll down until at least three paragraphs are shown.",
- "expect": "Infinite Scroll"
+  "name": "ti-window",
+  "url": "https://the-internet.herokuapp.com/windows",
+  "goal": "Click the link that opens a new window and stop when the new window is showing.",
+  "expect": "New Window"
  },
  {
- "name": "ti-key-prompt",
- "url": "https://the-internet.herokuapp.com/key_presses",
- "goal": "Press the letter A key in the input field.",
- "expect": "You entered: A"
+  "name": "ti-js-prompt",
+  "url": "https://the-internet.herokuapp.com/javascript_alerts",
+  "goal": "Click the 'Click for JS Prompt' button, enter the provided text in the prompt, and accept it.",
+  "values": {
+   "text": "brojev"
+  },
+  "expect": "You entered: brojev"
  },
  {
- "name": "todo-add-complete",
- "url": "https://todomvc.com/examples/react/dist/",
- "goal": "Add the todos 'buy milk', 'write code' and 'sleep', then mark 'write code' as completed.",
- "values": {
-  "todo 1": "buy milk",
-  "todo 2": "write code",
-  "todo 3": "sleep"
- },
- "expect": "2 items left",
- "maxSteps": 25
+  "name": "ti-large-dom",
+  "url": "https://the-internet.herokuapp.com/large",
+  "goal": "Scroll down to the bottom of the table and stop when the last row (50.50) is visible.",
+  "expect": "50.50"
  },
  {
- "name": "books-category-price",
- "url": "https://books.toscrape.com/",
- "goal": "Open the Mystery category and then open the first book listed.",
- "expect": "Add to basket"
+  "name": "ti-infinite-scroll",
+  "url": "https://the-internet.herokuapp.com/infinite_scroll",
+  "goal": "Scroll down until at least three paragraphs are shown.",
+  "expect": "Infinite Scroll"
  },
  {
- "name": "wiki-infobox",
- "url": "https://en.wikipedia.org/wiki/Main_Page",
- "goal": "Search for 'Alan Turing' and open the article.",
- "values": {
-  "search": "Alan Turing"
+  "name": "ti-key-prompt",
+  "url": "https://the-internet.herokuapp.com/key_presses",
+  "goal": "Press the letter A key in the input field.",
+  "expect": "You entered: A"
  },
- "expect": "Turing"
+ {
+  "name": "todo-add-complete",
+  "url": "https://todomvc.com/examples/react/dist/",
+  "goal": "Add the todos 'buy milk', 'write code' and 'sleep', then mark 'write code' as completed.",
+  "values": {
+   "todo 1": "buy milk",
+   "todo 2": "write code",
+   "todo 3": "sleep"
+  },
+  "expect": "2 items left",
+  "maxSteps": 25
+ },
+ {
+  "name": "books-category-price",
+  "url": "https://books.toscrape.com/",
+  "goal": "Open the Mystery category and then open the first book listed.",
+  "expect": "Add to basket"
+ },
+ {
+  "name": "wiki-infobox",
+  "url": "https://en.wikipedia.org/wiki/Main_Page",
+  "goal": "Search for 'Alan Turing' and open the article.",
+  "values": {
+   "search": "Alan Turing"
+  },
+  "expect": "Turing"
+ },
+ {
+  "name": "excalidraw-rect",
+  "url": "https://excalidraw.com/",
+  "goal": "Pick the rectangle tool and draw one rectangle on the canvas.",
+  "reset": "localStorage.clear(); sessionStorage.clear()",
+  "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted);return e.some(x=>x.type==='rectangle')})()",
+  "maxSteps": 15
+ },
+ {
+  "name": "excalidraw-diagram",
+  "url": "https://excalidraw.com/",
+  "goal": "Draw a rectangle on the left side of the canvas, an ellipse on the right side, and an arrow from the rectangle to the ellipse.",
+  "reset": "localStorage.clear(); sessionStorage.clear()",
+  "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted);return e.some(x=>x.type==='rectangle') && e.some(x=>x.type==='ellipse') && e.some(x=>x.type==='arrow')})()",
+  "maxSteps": 30
  }
 ]

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -32,6 +33,12 @@ type Task struct {
 	// Answer asks the helper model to extract the requested information on
 	// DONE. Off by default: the caller gets the final snapshot anyway.
 	Answer bool `json:"answer,omitempty"`
+	// Reset is JS run once after the first navigation, followed by a reload
+	// (e.g. localStorage.clear() for a clean app state). Check is a JS
+	// expression that must become true for DONE to count (polled up to 6 s):
+	// verification for pages whose result is not visible text.
+	Reset string `json:"reset,omitempty"`
+	Check string `json:"check,omitempty"`
 }
 
 type Step struct {
@@ -91,6 +98,7 @@ type hist struct {
 	Text        string `json:"text,omitempty"`
 	PageChanged bool   `json:"page_changed"`
 	Error       string `json:"error,omitempty"`
+	Tool        string `json:"tool,omitempty"` // canvas drags: the active toolbar tool
 }
 
 func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
@@ -132,6 +140,12 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			return finish(p, "error", err.Error())
 		}
 		out.NavMS = time.Since(ns).Milliseconds()
+		if t.Reset != "" {
+			_, _ = p.Eval(ctx, t.Reset)
+			if _, err := p.Navigate(ctx, t.URL); err != nil {
+				return finish(p, "error", err.Error())
+			}
+		}
 		settle(ctx, p, settleBudget)
 	}
 
@@ -151,6 +165,13 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		snap, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen})
 		if err != nil {
 			return finish(p, "error", "snapshot: "+err.Error())
+		}
+		if os.Getenv("BROJEV_TRACE") != "" {
+			txt := snap.Text
+			if len(txt) > 200 {
+				txt = txt[:200]
+			}
+			fmt.Fprintf(os.Stderr, "trace t=%dms url=%s els=%d text=%q\n", elapsed(), snap.URL, len(snap.Elements), txt)
 		}
 		if !settledFirst && looksUnrendered(snap) {
 			// Attached to a tab that is still booting (SPA shell, loading text).
@@ -210,6 +231,12 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			"page":           map[string]any{"url": snap.URL, "title": snap.Title, "text": snap.Text},
 			"elements":       sp.table,
 			"recent_actions": tail(history, 10),
+		}
+		if tools := pressedTools(snap); len(tools) > 0 {
+			state["active_tool"] = tools
+		}
+		if drawn := canvasDrawn(history); len(drawn) > 0 {
+			state["canvas_drawn"] = drawn // pixels are invisible to you: this is what you already drew
 		}
 		if snap.Dialog != nil {
 			state["dialog"] = map[string]string{"type": snap.Dialog.Type, "message": snap.Dialog.Message}
@@ -280,6 +307,25 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				out.HelperMS += ms
 				out.Answer = ans
 			}
+			if t.Check != "" {
+				ok := false
+				for end := time.Now().Add(6 * time.Second); ; {
+					if v, err := p.Eval(ctx, t.Check); err == nil && string(v) == "true" {
+						ok = true
+						break
+					}
+					if time.Now().After(end) || ctx.Err() != nil {
+						break
+					}
+					time.Sleep(300 * time.Millisecond)
+				}
+				if out.Verified == nil || *out.Verified {
+					out.Verified = &ok
+				}
+				if !ok {
+					return finish(p, "needs_claude", "Jev chose DONE but the check expression is not true")
+				}
+			}
 			if out.Verified != nil && !*out.Verified {
 				return finish(p, "needs_claude", fmt.Sprintf("Jev chose DONE but expected text %q is not visible", t.Expect))
 			}
@@ -320,6 +366,40 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		case "BACK":
 			res, actErr = p.History(ctx, -1)
 			h.Action = "back"
+		case "CANVAS_CLICK":
+			o := sp.heads[op].options[target]
+			step.Target = target + " " + describeCell(sp.heads[op], target)
+			h.Action = "click canvas " + target
+			res, actErr = p.ClickXY(ctx, o.x, o.y, page.ClickOptions{})
+		case "CANVAS_DRAG":
+			from := sp.heads[op].options[target]
+			ta, ok := resp.Answers[sp.canvasTo.qid]
+			dk := map[string]bool{}
+			for k := range sp.canvasTo.options {
+				dk[k] = true
+			}
+			if !ok || jev.Valid(ta, dk) != nil {
+				actErr = errors.New("invalid canvas drag destination answer")
+				break
+			}
+			if ta.Choice == target {
+				actErr = errors.New("canvas drag start equals end")
+				break
+			}
+			to := sp.canvasTo.options[ta.Choice]
+			step.Target = target + " -> " + ta.Choice
+			h.Action = "drag on canvas " + target + " to " + ta.Choice
+			h.Tool = strings.Join(pressedTools(snap), "+")
+			for _, prev := range history {
+				if prev.Error == "" && prev.Action == h.Action && prev.Tool == h.Tool {
+					actErr = errors.New("already drew this with this tool: choose another tool or different cells")
+					break
+				}
+			}
+			if actErr != nil {
+				break
+			}
+			res, actErr = p.DragXY(ctx, from.x, from.y, to.x, to.y)
 		case "DIALOG_PROMPT":
 			o := sp.heads[op].options[target]
 			step.Target, step.Text = o.label, o.value
@@ -516,7 +596,8 @@ func retryable(err error) bool {
 func stalled(h []hist) bool {
 	n := 0
 	for i := len(h) - 1; i >= 0 && n < 3; i-- {
-		if h[i].Kind == "WAIT" || h[i].Error != "" {
+		// Canvas drawing changes pixels, not the DOM: it can never look "stalled".
+		if h[i].Kind == "WAIT" || h[i].Error != "" || strings.HasPrefix(h[i].Kind, "CANVAS") {
 			continue
 		}
 		if h[i].PageChanged {
@@ -635,4 +716,40 @@ func (r *Runner) answer(ctx context.Context, goal string, s *page.Snapshot) (int
 		return d.Milliseconds(), ""
 	}
 	return d.Milliseconds(), res.Answer
+}
+
+func describeCell(h *head, key string) string {
+	if d, ok := h.criteria[key].(map[string]any); ok {
+		if p, ok := d["position"].(string); ok {
+			return "(" + p + ")"
+		}
+	}
+	return ""
+}
+
+// pressedTools lists toolbar buttons currently pressed (the active drawing tool).
+func pressedTools(s *page.Snapshot) []string {
+	var out []string
+	for _, e := range s.Elements {
+		if e.InView && e.Name != "" && has(e.States, "pressed") && len(e.Name) < 40 {
+			out = append(out, e.Name)
+		}
+	}
+	return out
+}
+
+// canvasDrawn summarizes successful canvas drags so far, since the canvas
+// content itself is not visible to Jev.
+func canvasDrawn(h []hist) []string {
+	var out []string
+	for _, x := range h {
+		if x.Kind == "CANVAS_DRAG" && x.Error == "" {
+			tool := x.Tool
+			if tool == "" {
+				tool = "(unknown tool)"
+			}
+			out = append(out, tool+": "+strings.TrimPrefix(x.Action, "drag on canvas "))
+		}
+	}
+	return out
 }

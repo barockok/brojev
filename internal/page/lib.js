@@ -2,7 +2,7 @@
 // scripts cannot see or tamper with it. Element refs are stable integer ids
 // held through WeakRefs: a ref stays valid while its node stays connected.
 (() => {
-  const VERSION = 7;
+  const VERSION = 9;
   if (globalThis.__bj && globalThis.__bj.v === VERSION) return;
 
   const ids = new WeakMap();
@@ -53,6 +53,7 @@
       case "button": case "summary": return "button";
       case "select": return el.multiple || el.size > 1 ? "listbox" : "combobox";
       case "textarea": return "textbox";
+      case "canvas": return "canvas";
       case "option": return "option";
       case "input": {
         const t = (el.getAttribute("type") || "").toLowerCase();
@@ -222,6 +223,11 @@
 
   const interactive = (el) => {
     const tag = el.localName;
+    if (tag === "canvas") {
+      // A drawing surface (whiteboard, map, game): actionable by position.
+      const r = el.getBoundingClientRect();
+      return r.width * r.height >= 40000;
+    }
     if (tag === "input") return (el.type || "").toLowerCase() !== "hidden";
     if (["button", "select", "textarea", "summary"].includes(tag)) return true;
     if (tag === "a" && el.hasAttribute("href")) return true;
@@ -288,6 +294,19 @@
         item.options = Array.from(el.options).slice(0, 50).map((o) => clean(o.label || o.text, 60));
       }
       if (el.localName === "input" && el.type) item.type = el.type;
+      if (el.localName === "canvas") {
+        // Which cells of a 5x6 grid reach the canvas itself and not toolbars
+        // or panels floating above it ("1" free, "0" covered/offscreen).
+        let free = "";
+        for (let rr = 0; rr < 5; rr++) {
+          for (let cc = 0; cc < 6; cc++) {
+            const x = r.left + (r.width * (cc + 0.5)) / 6, y = r.top + (r.height * (rr + 0.5)) / 5;
+            const hit = x >= 0 && y >= 0 && x < vw && y < vh ? deepHit(x, y) : null;
+            free += hit && hit.localName === "canvas" ? "1" : "0";
+          }
+        }
+        item.free = free;
+      }
       out.push(item);
       return true;
     };
