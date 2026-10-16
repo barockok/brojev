@@ -460,6 +460,7 @@ Submit populated search fields before opening a result; a populated field alone 
 If Search/Submit is visible and the required fields are ready, CLICK it immediately.
 Offscreen elements can be used directly; they scroll into view automatically. SCROLL only to find content that is not listed.
 PRESS_KEY Enter submits a field when no submit button is offered; Escape closes popups.
+Sliders and number inputs are set with TYPE_TEXT using the number from the goal; arrow keys only work on a focused slider.
 On drawing canvases, CANVAS_DRAG draws with the ACTIVE tool (the pressed toolbar button): CLICK the needed tool first, then drag.
 After each drawn item the tool may reset: re-select it before the next one. Never repeat an identical canvas action.
 HOVER only to reveal menus that open on hover. UPLOAD attaches the provided files.

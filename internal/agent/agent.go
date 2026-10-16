@@ -245,6 +245,21 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				r.emit(st)
 				history = append(history, hist{Action: st.Target, Kind: "TYPE_TEXT", Text: f.text})
 			}
+			// Editors that finish booting after we typed (rich text, SPAs)
+			// can wipe the value: check it stuck and type again once if not.
+			time.Sleep(250 * time.Millisecond)
+			if again, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: -1, MaxOffscreen: -1}); err == nil {
+				for _, f := range fills {
+					if f.el.Type == "password" {
+						continue
+					}
+					for _, e := range again.Elements {
+						if e.Ref == f.el.Ref && (e.Value == nil || !strings.Contains(*e.Value, f.text)) {
+							_, _ = p.Type(ctx, f.el.Ref, f.text, page.TypeOptions{})
+						}
+					}
+				}
+			}
 			continue
 		}
 
@@ -307,10 +322,10 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		step := Step{N: len(out.Steps) + 1, Op: op, Confidence: round3(conf), JevMS: resp.Latency.Milliseconds(), AtMS: elapsed()}
 		if conf < t.MinConfidence && op != "WAIT" {
 			lowConf++
-			if lowConf >= 2 {
+			if lowConf >= 3 {
 				step.Note = "stopped: low confidence"
 				out.Steps = append(out.Steps, step)
-				return finish(p, "needs_claude", fmt.Sprintf("low confidence twice; last choice %s %s (p=%.2f); alternatives: %s",
+				return finish(p, "needs_claude", fmt.Sprintf("low confidence 3 times; last choice %s %s (p=%.2f); alternatives: %s",
 					op, sp.describe(op, target), conf, topK(opAns.Probabilities, 3)))
 			}
 		} else {
@@ -404,13 +419,18 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 				actErr = errors.New("invalid canvas drag destination answer")
 				break
 			}
-			if ta.Choice == target {
-				actErr = errors.New("canvas drag start equals end")
-				break
+			dest := ta.Choice
+			if dest == target {
+				// Start and end are chosen in parallel, so they can collide:
+				// take the end Jev liked second best.
+				if dest = altChoice(ta.Probabilities, target); dest == "" {
+					actErr = errors.New("canvas drag start equals end")
+					break
+				}
 			}
-			to := sp.canvasTo.options[ta.Choice]
-			step.Target = target + " -> " + ta.Choice
-			h.Action = "drag on canvas " + target + " to " + ta.Choice
+			to := sp.canvasTo.options[dest]
+			step.Target = target + " -> " + dest
+			h.Action = "drag on canvas " + target + " to " + dest
 			h.Tool = strings.Join(pressedTools(snap), "+")
 			for _, prev := range history {
 				if prev.Error == "" && prev.Action == h.Action && prev.Tool == h.Tool {
@@ -484,6 +504,14 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 					step.Text, h.Text = text, text
 					res, actErr = p.Type(ctx, o.ref, text, page.TypeOptions{Submit: op == "TYPE_SUBMIT"})
 				}
+			}
+		}
+		if actErr == nil && (op == "CLICK" || op == "TYPE_SUBMIT" || (op == "PRESS_KEY" && target == "Enter")) {
+			// A submit that has not shown any effect yet is usually still in
+			// flight (slow network, client-side routing): give it a moment
+			// instead of letting Jev click again.
+			if after, err := r.Env.TabIDs(ctx); err != nil || newest(before, after) == "" {
+				waitChange(ctx, p, fp, 1500*time.Millisecond)
 			}
 		}
 		step.ActMS = time.Since(actStart).Milliseconds()
@@ -579,6 +607,22 @@ func settle(ctx context.Context, p *page.Page, budget time.Duration) {
 	}
 }
 
+// waitChange polls until the page fingerprint differs from fp or budget ends.
+func waitChange(ctx context.Context, p *page.Page, fp uint64, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		s, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen})
+		if err != nil || s.Dialog != nil || fingerprint(s) != fp {
+			return
+		}
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 var loadingRe = regexp.MustCompile(`(?i)\b(loading|please wait|wait for it|processing|in progress)\b`)
 
 func loadingText(text string) bool { return loadingRe.MatchString(text) }
@@ -607,7 +651,7 @@ func (r *Runner) emit(s Step) {
 
 func retryable(err error) bool {
 	s := err.Error()
-	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context"} {
+	for _, k := range []string{"stale ref", "covered by", "not visible", "did not take focus", "frame f", "context", "invalid canvas drag", "invalid drag destination", "already drew this"} {
 		if strings.Contains(s, k) {
 			return true
 		}
@@ -738,6 +782,17 @@ func (r *Runner) answer(ctx context.Context, goal string, s *page.Snapshot) (int
 		return d.Milliseconds(), ""
 	}
 	return d.Milliseconds(), res.Answer
+}
+
+// altChoice returns the most probable key other than exclude ("" if none).
+func altChoice(probs map[string]float64, exclude string) string {
+	best, bp := "", -1.0
+	for k, p := range probs {
+		if k != exclude && (p > bp || p == bp && k < best) {
+			best, bp = k, p
+		}
+	}
+	return best
 }
 
 func describeCell(h *head, key string) string {
