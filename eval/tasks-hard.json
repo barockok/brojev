@@ -151,5 +151,17 @@
   "reset": "(()=>{const o=Storage.prototype.setItem; localStorage.clear(); sessionStorage.clear(); o.call(sessionStorage,'bj_t0',String(Date.now())); Storage.prototype.setItem=function(k,v){ if(this===sessionStorage) return o.call(this,k,v); }})()",
   "check": "(()=>{const e=JSON.parse(localStorage.getItem('excalidraw')||'[]').filter(x=>!x.isDeleted&&x.updated>Number(sessionStorage.getItem('bj_t0')));if(!['rectangle','diamond','ellipse'].every(ty=>e.some(x=>x.type===ty)))return false;const k=new Set(e.map(x=>[x.x,x.y,x.width,x.height].map(v=>Math.round(v/10)).join()));return k.size===e.length})()",
   "maxSteps": 30
+ },
+ {
+  "name": "gf-oneway",
+  "url": "https://www.google.com/travel/flights?hl=en",
+  "goal": "Search one-way flights from Jakarta to Bali (Denpasar) for one adult in economy on 2026-12-18 using the Search button, and stop when the list of flights shows.",
+  "values": {
+   "origin": "Jakarta",
+   "destination": "Denpasar",
+   "date": "2026-12-18"
+  },
+  "expect": "results returned",
+  "maxSteps": 30
  }
 ]
