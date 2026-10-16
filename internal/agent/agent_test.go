@@ -219,8 +219,8 @@ func TestLoopFillsSelectsSubmits(t *testing.T) {
 		t.Fatalf("outcome: %+v\nsteps: %+v", out, out.Steps)
 	}
 	// The unambiguous Name/name pair is typed without a model call.
-	if out.JevCalls != 3 || len(out.Steps) != 4 {
-		t.Fatalf("want 3 decisions and 4 steps, got %d (%+v)", out.JevCalls, out.Steps)
+	if out.JevCalls != 2 || len(out.Steps) != 4 {
+		t.Fatalf("want 2 decisions and 4 steps, got %d (%+v)", out.JevCalls, out.Steps)
 	}
 	if out.Steps[0].Text != "Ada" || out.Steps[0].Note != "prefill name" || out.Steps[1].Op != "SELECT" || !out.Steps[2].PageChanged {
 		t.Fatalf("steps: %+v", out.Steps)

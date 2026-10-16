@@ -196,12 +196,34 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 			return finish(p, "budget", "decision limit reached")
 		}
 
+		// The caller's success text is already on screen after we acted: done,
+		// no model call needed. (Expect is documented as text that only
+		// appears on success; text visible before any action does not count.)
+		if t.Expect != "" && executed > 0 && snap.Dialog == nil && strings.Contains(snap.Text, t.Expect) && t.Check == "" {
+			v := true
+			out.Verified = &v
+			st := Step{N: len(out.Steps) + 1, Op: "DONE", Confidence: 1, Note: "expected text is visible", AtMS: elapsed()}
+			out.Steps = append(out.Steps, st)
+			r.emit(st)
+			if t.Answer && r.LLM != nil {
+				ms, ans := r.answer(ctx, t.Goal, snap)
+				out.HelperMS += ms
+				out.Answer = ans
+			}
+			return finish(p, "done", "")
+		}
+
 		// A visible "loading" state after an action: wait it out instead of
 		// asking Jev to guess (it tends to click around meanwhile).
 		if n := len(history); n > 0 && loadingWaited < 20*time.Second && loadingText(snap.Text) {
 			ws := time.Now()
 			waitLoadingGone(ctx, p, 8*time.Second)
 			loadingWaited += time.Since(ws)
+			// Record the wait so Jev knows it already happened (goals say "wait until").
+			st := Step{N: len(out.Steps) + 1, Op: "WAIT", Confidence: 1, Note: "auto: page showed loading text", ActMS: time.Since(ws).Milliseconds(), AtMS: elapsed()}
+			out.Steps = append(out.Steps, st)
+			r.emit(st)
+			history = append(history, hist{Action: "wait", Kind: "WAIT", PageChanged: true})
 			continue
 		}
 
