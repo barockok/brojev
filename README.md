@@ -124,6 +124,23 @@ brojev profile use work [--quit]                 # switch; --quit closes the pre
 
 Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; profile switching is refused; the daemon keeps one idle `about:blank#brojev-guard` tab open, hidden from `tabs`, so the window never closes), `BROJEV_NO_SPAWN=1` (clients never start or replace the daemon and `brojev stop` is refused; they fail if it is not running or runs another version. The daemon itself still accepts `shutdown` from any socket client), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
+## Shared host daemon
+
+One daemon on a host can serve several clients, for example agents in containers, so they share one browser and its logins:
+
+- **Daemon**: runs on the host as one uid, with `BROJEV_CDP_URL` pointing at a Chrome the operator starts and manages (e.g. `--remote-debugging-port=9223 --remote-debugging-address=127.0.0.1`). brojev never launches or quits that Chrome; its guard tab keeps the window open when every other tab closes, and profile switching is refused.
+- **Clients**: run `brojev mcp` as the same uid, with `BROJEV_HOME` pointing at the bind-mounted directory that holds the host's `brojevd.sock`, and `BROJEV_NO_SPAWN=1` so they never start a daemon of their own. Keep that path short (100 bytes or less including `/brojevd.sock`) on both sides, or the socket falls back to a per-home path in `/tmp`.
+- **Permissions**: the socket is mode 0600, so the client uid must match the daemon uid.
+- **Versions**: the host daemon and the client binary must be the same version. Under `BROJEV_NO_SPAWN` a mismatch is a hard error instead of a daemon replacement, so upgrade both together.
+- **Limit**: the daemon still accepts `shutdown` from any socket client (`brojev stop` is refused only client side). Daemon-side policy is future work.
+
+```sh
+# host
+BROJEV_HOME=/srv/brojev BROJEV_CDP_URL=http://127.0.0.1:9223 brojev daemon
+# container, same uid, /srv/brojev bind-mounted
+BROJEV_HOME=/srv/brojev BROJEV_NO_SPAWN=1 brojev mcp
+```
+
 ## Tests
 
 ```sh
