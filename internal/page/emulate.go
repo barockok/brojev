@@ -147,8 +147,7 @@ func (p *Page) SaveState(ctx context.Context, path string) (int, error) {
 	}
 	st := State{Cookies: res.Cookies, LocalStorage: map[string]map[string]string{}}
 	if origin := p.origin(ctx); origin != "" {
-		var ls map[string]string
-		if v, err := p.Eval(ctx, "Object.fromEntries(Object.entries(localStorage))"); err == nil && json.Unmarshal(v, &ls) == nil {
+		if ls, err := p.LocalStorage(ctx); err == nil {
 			st.LocalStorage[origin] = ls
 		}
 	}
@@ -170,8 +169,29 @@ func (p *Page) LoadState(ctx context.Context, path string) (string, error) {
 	if err := json.Unmarshal(b, &st); err != nil {
 		return "", err
 	}
-	var cookies []map[string]any
-	for _, c := range st.Cookies {
+	cookies := CleanCookies(st.Cookies)
+	if len(cookies) > 0 {
+		if err := p.S.Conn().Browser().Call(ctx, "Storage.setCookies", map[string]any{"cookies": cookies}, nil); err != nil {
+			return "", err
+		}
+	}
+	note := fmt.Sprintf("restored %d cookies", len(cookies))
+	if origin := p.origin(ctx); origin != "" {
+		if ls, ok := st.LocalStorage[origin]; ok {
+			if err := p.SetLocalStorage(ctx, ls); err != nil {
+				return note, err
+			}
+			note += fmt.Sprintf(" and %d localStorage keys for %s", len(ls), origin)
+		}
+	}
+	return note, nil
+}
+
+// CleanCookies keeps the fields Storage.setCookies accepts from cookies read
+// with Storage.getCookies, and drops expires from session cookies.
+func CleanCookies(in []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, c := range in {
 		clean := map[string]any{}
 		for _, f := range cookieFields {
 			if v, ok := c[f]; ok {
@@ -181,22 +201,36 @@ func (p *Page) LoadState(ctx context.Context, path string) (string, error) {
 		if s, _ := c["session"].(bool); s {
 			delete(clean, "expires")
 		}
-		cookies = append(cookies, clean)
+		out = append(out, clean)
 	}
-	if len(cookies) > 0 {
-		if err := p.S.Conn().Browser().Call(ctx, "Storage.setCookies", map[string]any{"cookies": cookies}, nil); err != nil {
-			return "", err
-		}
+	return out
+}
+
+// Origin is the current page's scheme://host ("" for about:blank, data: ...).
+func (p *Page) Origin(ctx context.Context) string { return p.origin(ctx) }
+
+// CurrentURL is the current page's location.href ("" if it cannot be read).
+func (p *Page) CurrentURL(ctx context.Context) string {
+	info, err := p.info(ctx)
+	if err != nil {
+		return ""
 	}
-	note := fmt.Sprintf("restored %d cookies", len(cookies))
-	if origin := p.origin(ctx); origin != "" {
-		if ls, ok := st.LocalStorage[origin]; ok {
-			b, _ := json.Marshal(ls)
-			if _, err := p.Eval(ctx, fmt.Sprintf("(() => { const d = %s; for (const k in d) localStorage.setItem(k, d[k]); return Object.keys(d).length })()", b)); err != nil {
-				return note, err
-			}
-			note += fmt.Sprintf(" and %d localStorage keys for %s", len(ls), origin)
-		}
+	return info.URL
+}
+
+// LocalStorage reads localStorage of the current origin.
+func (p *Page) LocalStorage(ctx context.Context) (map[string]string, error) {
+	v, err := p.Eval(ctx, "Object.fromEntries(Object.entries(localStorage))")
+	if err != nil {
+		return nil, err
 	}
-	return note, nil
+	var ls map[string]string
+	return ls, json.Unmarshal(v, &ls)
+}
+
+// SetLocalStorage writes keys into localStorage of the current origin.
+func (p *Page) SetLocalStorage(ctx context.Context, ls map[string]string) error {
+	b, _ := json.Marshal(ls)
+	_, err := p.Eval(ctx, fmt.Sprintf("(() => { const d = %s; for (const k in d) localStorage.setItem(k, d[k]); return Object.keys(d).length })()", b))
+	return err
 }
