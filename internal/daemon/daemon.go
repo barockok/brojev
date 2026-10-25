@@ -16,7 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -208,14 +208,15 @@ func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 }
 
 // connExternalLocked attaches to the Chrome at base, resolving its endpoint
-// again on every reconnect (a restarted Chrome gets a new browser id).
+// again on every reconnect (a restarted Chrome gets a new browser id), and
+// keeps its guard tab open on every call (see browser.EnsureGuard).
 func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.Browser, error) {
 	if s.browser != nil {
 		select {
 		case <-s.browser.Done():
 			s.dropLocked() // Chrome restarted or the socket dropped
 		default:
-			return s.browser, nil
+			return s.browser, s.browser.EnsureGuard(ctx)
 		}
 	}
 	ep, err := chrome.EndpointFromURL(ctx, base)
@@ -226,46 +227,21 @@ func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("attached to %s (external Chrome)", base)
-	s.prof = profile.Profile{Name: "external", Dir: base}
-	if err := b.EnableDownloads(ctx, filepath.Join(Home(), "downloads")); err != nil {
+	if err := b.EnsureGuard(ctx); err != nil {
+		b.Close()
+		return nil, err
+	}
+	log.Printf("attached to %s (external Chrome)", chrome.RedactURL(base))
+	s.prof = profile.Profile{Name: "external", Dir: chrome.RedactURL(base)}
+	dl := filepath.Join(Home(), "downloads")
+	if err := b.EnableDownloads(ctx, dl); err != nil {
 		log.Printf("downloads: %v", err)
+	} else {
+		log.Printf("downloads: set the external Chrome's download dir to %s", dl)
 	}
 	s.pages, s.cur = map[target.ID]*page.Page{}, ""
 	s.browser = b
 	return b, nil
-}
-
-// closeTab closes a tab. On an external Chrome the last tab is replaced by a
-// blank one first, since closing the last window can end a headful Chrome,
-// and the close is awaited (Target.closeTarget returns before the tab is
-// gone) so the next close counts tabs correctly.
-func (s *Server) closeTab(ctx context.Context, b *browser.Browser, id target.ID) error {
-	if CDPURL() == "" {
-		return b.CloseTab(ctx, id)
-	}
-	pages, err := b.Pages(ctx)
-	if err != nil {
-		return err
-	}
-	if len(pages) == 1 && pages[0].TargetID == id {
-		if _, err := b.Open(ctx, "about:blank"); err != nil {
-			return err
-		}
-	}
-	if err := b.CloseTab(ctx, id); err != nil {
-		return err
-	}
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		pages, err := b.Pages(ctx)
-		if err != nil {
-			return err
-		}
-		if !slices.ContainsFunc(pages, func(p *target.Info) bool { return p.TargetID == id }) {
-			return nil
-		}
-	}
-	return nil
 }
 
 // dropLocked forgets the live connection (Chrome itself keeps running).
@@ -334,7 +310,7 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.TargetID == "" {
 			return nil, errors.New("close: params.targetId required")
 		}
-		return map[string]bool{"ok": true}, s.closeTab(ctx, b, target.ID(p.TargetID))
+		return map[string]bool{"ok": true}, b.CloseTab(ctx, target.ID(p.TargetID))
 	}
 	return nil, fmt.Errorf("unknown method %q", req.Method)
 }
@@ -375,7 +351,13 @@ func Call(ctx context.Context, method string, params, out any) error {
 // NoSpawn is BROJEV_NO_SPAWN: this client only talks to a daemon someone
 // else runs (e.g. on the host, through a mounted socket) and never starts or
 // replaces one.
-func NoSpawn() bool { v := os.Getenv("BROJEV_NO_SPAWN"); return v != "" && v != "0" }
+func NoSpawn() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BROJEV_NO_SPAWN"))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
 
 // Ensure starts brojevd in the background if it is not answering.
 func Ensure(ctx context.Context, extraArgs ...string) error {

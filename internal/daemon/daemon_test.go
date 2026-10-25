@@ -123,3 +123,12 @@ func TestNoSpawnSameVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNoSpawnValues(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "0": false, "false": false, "No": false, " OFF ": false, "1": true, "yes": true, "true": true} {
+		t.Setenv("BROJEV_NO_SPAWN", v)
+		if NoSpawn() != want {
+			t.Fatalf("BROJEV_NO_SPAWN=%q: NoSpawn() = %v", v, !want)
+		}
+	}
+}

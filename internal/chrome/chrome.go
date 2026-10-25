@@ -79,38 +79,58 @@ var httpClient = &http.Client{
 func EndpointFromURL(ctx context.Context, base string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("BROJEV_CDP_URL %q: want an http or https URL like http://127.0.0.1:9222", base)
+		return "", fmt.Errorf("BROJEV_CDP_URL %q: want an http or https URL like http://127.0.0.1:9222", RedactURL(base))
 	}
 	vurl := strings.TrimSuffix(base, "/") + "/json/version"
+	shown := RedactURL(vurl) // errors and logs never carry credentials
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vurl, nil)
 	if err != nil {
-		return "", fmt.Errorf("GET %s: %w", vurl, err)
+		return "", fmt.Errorf("GET %s: request failed", shown)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("GET %s: %w", vurl, err)
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err // url.Error repeats the URL, credentials included
+		}
+		return "", fmt.Errorf("GET %s: %w", shown, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GET %s: status %d", vurl, resp.StatusCode)
+		return "", fmt.Errorf("GET %s: status %d", shown, resp.StatusCode)
 	}
 	var v struct {
 		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		return "", fmt.Errorf("bad /json/version from %s: %w", vurl, err)
+		return "", fmt.Errorf("bad /json/version from %s: %w", shown, err)
 	}
 	ws, err := url.Parse(v.WebSocketDebuggerURL)
 	if err != nil || v.WebSocketDebuggerURL == "" || ws.Path == "" {
-		return "", fmt.Errorf("no webSocketDebuggerUrl in /json/version from %s", vurl)
+		return "", fmt.Errorf("no webSocketDebuggerUrl in /json/version from %s", shown)
 	}
 	scheme := "ws"
 	if u.Scheme == "https" {
 		scheme = "wss"
 	}
 	return (&url.URL{Scheme: scheme, Host: u.Host, Path: ws.Path, RawQuery: ws.RawQuery}).String(), nil
+}
+
+// RedactURL hides any user:password in u, for errors and logs.
+func RedactURL(u string) string {
+	p, err := url.Parse(u)
+	if err != nil {
+		if strings.Contains(u, "@") {
+			return "(unparseable URL)"
+		}
+		return u
+	}
+	if p.User != nil {
+		p.User = url.User("redacted")
+	}
+	return p.String()
 }
 
 type Options struct {

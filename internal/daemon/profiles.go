@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/barockok/brojev/internal/chrome"
 	"github.com/barockok/brojev/internal/profile"
 )
 
@@ -43,7 +44,7 @@ func (s *Server) profileTool(ctx context.Context, raw json.RawMessage) (any, err
 		return s.profileList(cfg)
 	case "current":
 		if base := CDPURL(); base != "" {
-			return map[string]any{"name": "external", "cdpUrl": base, "note": errExternalChrome.Error()}, nil
+			return map[string]any{"name": "external", "cdpUrl": chrome.RedactURL(base), "note": errExternalChrome.Error()}, nil
 		}
 		p, err := ActiveProfile()
 		if err != nil {

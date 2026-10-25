@@ -68,6 +68,10 @@ func main() {
 	case "profile", "profiles":
 		err = runProfile(args)
 	case "stop":
+		if daemon.NoSpawn() {
+			err = errors.New("BROJEV_NO_SPAWN is set: this client does not manage the daemon; stop it where it runs")
+			break
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		err = daemon.Call(ctx, "shutdown", nil, nil)

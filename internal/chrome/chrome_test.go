@@ -86,3 +86,21 @@ func TestEndpointFromURLHTTPS(t *testing.T) {
 		t.Fatalf("got %q, want %q", ep, want)
 	}
 }
+
+func TestEndpointFromURLRedactsCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	live := strings.Replace(srv.URL, "http://", "http://user:s3cret@", 1)
+	ctx := context.Background()
+	_, err := EndpointFromURL(ctx, live)
+	srv.Close()
+	_, err2 := EndpointFromURL(ctx, live) // nothing listening now
+	_, err3 := EndpointFromURL(ctx, "ftp://user:s3cret@host")
+	for _, e := range []error{err, err2, err3} {
+		if e == nil || strings.Contains(e.Error(), "s3cret") || strings.Contains(e.Error(), "user:") {
+			t.Fatalf("error leaks credentials or is nil: %v", e)
+		}
+	}
+	if got := RedactURL("http://a:b@h:1/x"); got != "http://redacted@h:1/x" {
+		t.Fatalf("RedactURL = %q", got)
+	}
+}

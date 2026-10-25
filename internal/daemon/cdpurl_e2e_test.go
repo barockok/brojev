@@ -2,15 +2,25 @@ package daemon
 
 // BROJEV_CDP_URL against a real Chrome the test owns. Run:
 // BROJEV_E2E=1 go test ./internal/daemon/ -run CDPURL -v
+//
+// The Chrome here is headless, and a headless Chrome never exits when its
+// last tab closes, so this test cannot reproduce the headful case the guard
+// tab exists for (a headful Chrome on Linux/Windows quits with its last
+// window; no Xvfb on the dev Mac). What it does prove is the mechanism: the
+// guard tab survives closing every other tab, concurrently, and is recreated
+// or adopted as needed.
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -46,6 +56,61 @@ func startChrome(t *testing.T, bin, dir, port string) (*exec.Cmd, string) {
 	return nil, ""
 }
 
+type daemonProc struct {
+	log  *bytes.Buffer
+	done chan error
+}
+
+func startDaemon(t *testing.T, ctx context.Context, bin string) *daemonProc {
+	t.Helper()
+	d := &daemonProc{log: &bytes.Buffer{}, done: make(chan error, 1)}
+	cmd := exec.Command(bin, "daemon")
+	cmd.Env = os.Environ()
+	cmd.Stdout, cmd.Stderr = d.log, d.log
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { d.done <- cmd.Wait() }()
+	t.Cleanup(func() { cmd.Process.Kill() })
+	for i := 0; i < 50 && Call(ctx, "ping", nil, nil) != nil; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	return d
+}
+
+func (d *daemonProc) shutdown(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if err := Call(ctx, "shutdown", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-d.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not exit")
+	}
+}
+
+// guards lists the guard tabs straight from Chrome's /json/list.
+func guards(t *testing.T, base string) []string {
+	t.Helper()
+	resp, err := http.Get(base + "/json/list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var list []struct{ ID, Type, URL string }
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, p := range list {
+		if p.Type == "page" && p.URL == browser.GuardURL {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
+}
+
 func TestCDPURLEndToEnd(t *testing.T) {
 	if os.Getenv("BROJEV_E2E") != "1" {
 		t.Skip("set BROJEV_E2E=1")
@@ -66,75 +131,122 @@ func TestCDPURLEndToEnd(t *testing.T) {
 	t.Setenv("BROJEV_HOME", home)
 	t.Setenv("BROJEV_CDP_URL", base)
 	t.Setenv("BROJEV_CHROME", "/nonexistent/chrome") // proves brojev never launches one
-	var dlog bytes.Buffer
-	d := exec.Command(bin, "daemon")
-	d.Env = os.Environ()
-	d.Stdout, d.Stderr = &dlog, &dlog
-	if err := d.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- d.Wait() }()
-	t.Cleanup(func() { d.Process.Kill(); <-done })
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	for i := 0; i < 50 && Call(ctx, "ping", nil, nil) != nil; i++ {
-		time.Sleep(100 * time.Millisecond)
-	}
+	d := startDaemon(t, ctx, bin)
 
 	open := func(title string) {
 		t.Helper()
 		var info browser.PageInfo
 		u := "data:text/html," + url.PathEscape("<title>"+title+"</title><p>hi")
 		if err := Call(ctx, "open", map[string]string{"url": u}, &info); err != nil {
-			t.Fatalf("open: %v\n%s", err, dlog.String())
+			t.Fatalf("open: %v\n%s", err, d.log.String())
 		}
 		if info.Title != title {
 			t.Fatalf("title %q, want %q", info.Title, title)
 		}
 	}
-	open("cdp one")
+	listTabs := func() []TabInfo {
+		t.Helper()
+		var tabs []TabInfo
+		if err := Call(ctx, "tabs", nil, &tabs); err != nil {
+			t.Fatal(err)
+		}
+		return tabs
+	}
+	oneGuard := func() string {
+		t.Helper()
+		g := guards(t, base)
+		if len(g) != 1 {
+			t.Fatalf("want exactly one guard tab, got %v", g)
+		}
+		return g[0]
+	}
+
+	for _, title := range []string{"cdp one", "cdp two", "cdp three", "cdp four"} {
+		open(title)
+	}
 	if err := Call(ctx, "profile", map[string]any{"action": "use", "name": "default", "quit": true}, nil); err == nil || err.Error() != errExternalChrome.Error() {
 		t.Fatalf("profile use: %v", err)
 	}
-
-	// Closing every tab must leave Chrome running (the last one is replaced).
-	var tabs []TabInfo
-	if err := Call(ctx, "tabs", nil, &tabs); err != nil || len(tabs) < 2 {
-		t.Fatalf("tabs: %v %v", tabs, err)
-	}
+	guard := oneGuard()
+	tabs := listTabs()
 	for _, tab := range tabs {
-		if err := Call(ctx, "close", map[string]string{"targetId": tab.TargetID}, nil); err != nil {
-			t.Fatalf("close %s: %v", tab.TargetID, err)
+		if tab.TargetID == guard {
+			t.Fatal("tabs lists the guard tab")
 		}
 	}
-	if err := Call(ctx, "tabs", nil, &tabs); err != nil || len(tabs) != 1 {
-		t.Fatalf("after closing all: %v %v", tabs, err)
+	for _, m := range []string{"close", "tab_close", "tab_switch"} {
+		if err := Call(ctx, m, map[string]string{"targetId": guard}, nil); err == nil || !strings.Contains(err.Error(), "guard tab") {
+			t.Fatalf("%s on the guard: %v", m, err)
+		}
+	}
+
+	// Close every other tab from two goroutines at once.
+	var wg sync.WaitGroup
+	errs := make(chan error, len(tabs))
+	for g := 0; g < 2; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := g; i < len(tabs); i += 2 {
+				errs <- Call(ctx, "close", map[string]string{"targetId": tabs[i].TargetID}, nil)
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 40 && len(listTabs()) > 0; i++ { // Target.closeTarget is asynchronous
+		time.Sleep(50 * time.Millisecond)
+	}
+	if left := listTabs(); len(left) != 0 {
+		t.Fatalf("tabs left: %v", left)
+	}
+	if oneGuard() != guard {
+		t.Fatal("guard tab changed")
+	}
+
+	// Someone else closes the guard: the next call recreates it.
+	if resp, err := http.Get(base + "/json/close/" + guard); err == nil {
+		resp.Body.Close()
+	}
+	for i := 0; i < 40 && len(guards(t, base)) > 0; i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	listTabs()
+	if g := oneGuard(); g == guard {
+		t.Fatal("guard was not recreated")
 	}
 
 	// Chrome restarts on the same port: the next call re-resolves the endpoint.
 	chromeCmd.Process.Kill()
 	chromeCmd.Wait()
 	chromeCmd, _ = startChrome(t, chromeBin, prof, port)
-	open("cdp two")
+	open("cdp five")
+	guard = oneGuard()
+	d.shutdown(t, ctx)
+	if n := strings.Count(d.log.String(), "attached to "+base+" (external Chrome)"); n != 2 {
+		t.Fatalf("want 2 attach lines (initial + after restart), got %d:\n%s", n, d.log.String())
+	}
 
-	if err := Call(ctx, "shutdown", nil, nil); err != nil {
-		t.Fatal(err)
+	// A new daemon adopts the existing guard instead of adding one.
+	d = startDaemon(t, ctx, bin)
+	listTabs()
+	if g := oneGuard(); g != guard {
+		t.Fatalf("guard %s not adopted (now %s)", guard, g)
 	}
-	select {
-	case <-done:
-		done <- nil // for the cleanup
-	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not exit")
-	}
+	d.shutdown(t, ctx)
+
 	time.Sleep(300 * time.Millisecond)
 	if err := chromeCmd.Process.Signal(syscall.Signal(0)); err != nil {
 		t.Fatalf("chrome died with the daemon: %v", err)
 	}
 	if _, err := chrome.EndpointFromURL(ctx, base); err != nil {
 		t.Fatalf("chrome stopped answering: %v", err)
-	}
-	if n := strings.Count(dlog.String(), "attached to "+base+" (external Chrome)"); n != 2 {
-		t.Fatalf("want 2 attach lines (initial + after restart), got %d:\n%s", n, dlog.String())
 	}
 }

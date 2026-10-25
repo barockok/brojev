@@ -3,6 +3,7 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -21,9 +22,65 @@ type Browser struct {
 	Endpoint string
 	conn     *cdp.Conn
 
-	mu   sync.Mutex
-	tabs map[target.ID]*Tab
-	dl   *downloads
+	mu    sync.Mutex
+	tabs  map[target.ID]*Tab
+	dl    *downloads
+	tabMu sync.Mutex // serializes creating and closing tabs
+	guard target.ID  // see EnsureGuard; hidden from Pages, never attached or closed
+}
+
+// GuardURL marks the guard tab, so a restarted daemon adopts it instead of
+// adding another.
+const GuardURL = "about:blank#brojev-guard"
+
+var ErrGuardTab = errors.New("that is brojev's guard tab: it keeps the external Chrome's window open, so brojev does not drive or close it")
+
+// EnsureGuard keeps exactly one guard tab open (BROJEV_CDP_URL mode): an
+// idle about:blank tab brojev owns, so closing every other tab (or a page
+// calling window.close()) never closes the last window of a Chrome brojev
+// does not manage. It adopts an existing guard, recreates a closed one, and
+// closes extra guards.
+func (b *Browser) EnsureGuard(ctx context.Context) error {
+	b.tabMu.Lock()
+	defer b.tabMu.Unlock()
+	res, err := cdproto.Call(ctx, b.conn.Browser(), target.GetTargets, target.GetTargetsParams{})
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	cur := b.guard
+	b.mu.Unlock()
+	var guards []target.ID
+	for _, t := range res.TargetInfos {
+		if t.Type == "page" && (t.TargetID == cur || t.URL == GuardURL) {
+			if t.TargetID == cur { // the recorded one wins
+				guards = append([]target.ID{t.TargetID}, guards...)
+			} else {
+				guards = append(guards, t.TargetID)
+			}
+		}
+	}
+	if len(guards) == 0 {
+		no, yes := false, true
+		created, err := cdproto.Call(ctx, b.conn.Browser(), target.CreateTarget, target.CreateTargetParams{URL: GuardURL, Background: &yes, Focus: &no})
+		if err != nil {
+			return fmt.Errorf("guard tab: %w", err)
+		}
+		guards = []target.ID{created.TargetID}
+	}
+	for _, id := range guards[1:] {
+		_, _ = cdproto.Call(ctx, b.conn.Browser(), target.CloseTarget, target.CloseTargetParams{TargetID: id})
+	}
+	b.mu.Lock()
+	b.guard = guards[0]
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *Browser) isGuard(id target.ID) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.guard != "" && id == b.guard
 }
 
 type Tab struct {
@@ -48,7 +105,7 @@ func (b *Browser) Version(ctx context.Context) (*cbrowser.GetVersionResult, erro
 	return &v, err
 }
 
-// Pages lists page targets (tabs) in the browser.
+// Pages lists page targets (tabs) in the browser, without the guard tab.
 func (b *Browser) Pages(ctx context.Context) ([]*target.Info, error) {
 	res, err := cdproto.Call(ctx, b.conn.Browser(), target.GetTargets, target.GetTargetsParams{})
 	if err != nil {
@@ -56,7 +113,7 @@ func (b *Browser) Pages(ctx context.Context) ([]*target.Info, error) {
 	}
 	var pages []*target.Info
 	for _, t := range res.TargetInfos {
-		if t.Type == "page" {
+		if t.Type == "page" && !b.isGuard(t.TargetID) {
 			pages = append(pages, t)
 		}
 	}
@@ -65,6 +122,9 @@ func (b *Browser) Pages(ctx context.Context) ([]*target.Info, error) {
 
 // Attach returns the tab's session, attaching once per target.
 func (b *Browser) Attach(ctx context.Context, id target.ID) (*Tab, error) {
+	if b.isGuard(id) {
+		return nil, ErrGuardTab
+	}
 	b.mu.Lock()
 	if t := b.tabs[id]; t != nil {
 		b.mu.Unlock()
@@ -100,7 +160,9 @@ type PageInfo struct {
 // Open creates a background tab, navigates it and waits for load.
 func (b *Browser) Open(ctx context.Context, url string) (*PageInfo, error) {
 	no := false
+	b.tabMu.Lock()
 	created, err := cdproto.Call(ctx, b.conn.Browser(), target.CreateTarget, target.CreateTargetParams{URL: "about:blank", Focus: &no})
+	b.tabMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +190,12 @@ func (b *Browser) Forget(id target.ID) {
 }
 
 func (b *Browser) CloseTab(ctx context.Context, id target.ID) error {
+	if b.isGuard(id) {
+		return ErrGuardTab
+	}
+	b.tabMu.Lock()
 	_, err := cdproto.Call(ctx, b.conn.Browser(), target.CloseTarget, target.CloseTargetParams{TargetID: id})
+	b.tabMu.Unlock()
 	b.mu.Lock()
 	delete(b.tabs, id)
 	b.mu.Unlock()
