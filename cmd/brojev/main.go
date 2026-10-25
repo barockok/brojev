@@ -101,6 +101,7 @@ func usage() {
   scroll [ref] [dy] | drag <from> <to> | upload <ref> <file>... | dialog accept|dismiss [text]
   wait <text> | eval <js> | tabs | tab_new [url] | tab_switch <id> | tab_close [id] | downloads
   emulate <device>|reset | grant <permission>... | state_save [path] | state_load [path]
+  handoff start [url [reason]] | handoff finish [url] | handoff status   (needs BROJEV_HUMAN_CDP_URL)
   any tool also takes one JSON argument: brojev click '{"x":10,"y":20}'`)
 	os.Exit(2)
 }
@@ -199,6 +200,16 @@ func toolParams(tool string, args []string) (map[string]any, error) {
 	case "state_save", "state_load":
 		if len(args) > 0 {
 			p["path"] = args[0]
+		}
+	case "handoff":
+		if len(args) > 0 {
+			p["action"] = args[0]
+		}
+		if len(args) > 1 {
+			p["url"] = args[1]
+		}
+		if len(args) > 2 {
+			p["reason"] = strings.Join(args[2:], " ")
 		}
 	case "snapshot", "back", "forward", "reload", "tabs", "downloads":
 	default:

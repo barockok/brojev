@@ -287,6 +287,12 @@ type ProfileIn struct {
 	Quit          bool   `json:"quit,omitempty" jsonschema:"use: also close the previous profile's Chrome"`
 }
 
+type HandoffIn struct {
+	Action string `json:"action" jsonschema:"start (open the page in the person's browser with the agent's cookies), finish (copy their cookies back and continue where they ended), or status"`
+	URL    string `json:"url,omitempty" jsonschema:"start: page to hand over (default: the current tab's URL); finish: page to continue at (default: where the person ended)"`
+	Reason string `json:"reason,omitempty" jsonschema:"start: what the person should do, e.g. solve the CAPTCHA and log in"`
+}
+
 type StateIn struct {
 	Action string `json:"action" jsonschema:"save or load"`
 	Path   string `json:"path,omitempty" jsonschema:"JSON file (default ~/.brojev/state.json)"`
@@ -322,6 +328,11 @@ func register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{Name: "profile", Description: "List, inspect, add or switch the Chrome profile brojev drives. Each profile keeps its own logins. " +
 		"Switching only with the user's consent: the real Chrome profile exposes their personal sessions and sends page text to the Jev API."}, plain[ProfileIn]("profile"))
 	mcp.AddTool(s, &mcp.Tool{Name: "state", Description: "Save or load login state (all cookies plus localStorage of the current origin) to a JSON file."}, stateTool)
+	if daemon.HumanCDPURL() != "" { // opt-in: the tool list is unchanged without it
+		mcp.AddTool(s, &mcp.Tool{Name: "handoff", Description: "Hand one step to a person (CAPTCHA, login, 2FA, anything you cannot or should not do): " +
+			"start opens the current page in the person's visible browser with your cookies and returns a link for them; tell them what to do and wait for them to say they are done; " +
+			"finish copies their cookies back and continues in your tab where they ended. Never type the person's passwords or codes for them."}, handoffTool)
+	}
 }
 
 func runTool(ctx context.Context, _ *mcp.CallToolRequest, in RunIn) (*mcp.CallToolResult, any, error) {
@@ -474,4 +485,26 @@ func stateTool(ctx context.Context, req *mcp.CallToolRequest, in StateIn) (*mcp.
 		return plain[StateIn]("state_load")(ctx, req, in)
 	}
 	return fail(fmt.Errorf("action must be save or load")), nil, nil
+}
+
+func handoffTool(ctx context.Context, req *mcp.CallToolRequest, in HandoffIn) (*mcp.CallToolResult, any, error) {
+	switch in.Action {
+	case "start", "status", "":
+		return plain[HandoffIn]("handoff")(ctx, req, in)
+	case "finish":
+	default:
+		return fail(fmt.Errorf("action must be start, finish or status")), nil, nil
+	}
+	raw, err := call(ctx, "handoff", map[string]any{"action": "finish", "url": in.URL, "snapshot": true})
+	if err != nil {
+		return fail(err), nil, nil
+	}
+	var o struct {
+		Received json.RawMessage `json:"received"`
+		Page     json.RawMessage `json:"page"`
+	}
+	if json.Unmarshal(raw, &o) != nil || o.Page == nil {
+		return text(string(raw)), nil, nil
+	}
+	return text("received: " + string(o.Received) + "\n" + renderAction("handoff", o.Page)), nil, nil
 }

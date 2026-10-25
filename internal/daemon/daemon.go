@@ -76,6 +76,7 @@ type Server struct {
 	cur      target.ID
 	jev      *jev.Client
 	llm      *llm.Client
+	handoff  *handoffState // open handoff to a person's Chrome (handoff.go)
 	started  time.Time
 	quit     chan struct{}
 	quitOnce sync.Once
@@ -280,6 +281,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		return s.profileTool(ctx, req.Params)
 	case "keys":
 		return setKeys(req.Params)
+	case "handoff":
+		return s.handoffTool(ctx, req.Params)
 	case "shutdown":
 		s.quitOnce.Do(func() { close(s.quit) })
 		return map[string]bool{"ok": true}, nil

@@ -122,7 +122,7 @@ brojev profile add me --dir "~/Library/Application Support/Google/Chrome" --chro
 brojev profile use work [--quit]                 # switch; --quit closes the previous profile's Chrome
 ```
 
-Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; profile switching is refused; the daemon keeps one idle `about:blank#brojev-guard` tab open, hidden from `tabs`, so the window never closes), `BROJEV_NO_SPAWN=1` (clients never start or replace the daemon and `brojev stop` is refused; they fail if it is not running or runs another version. The daemon itself still accepts `shutdown` from any socket client), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
+Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; profile switching is refused; the daemon keeps one idle `about:blank#brojev-guard` tab open, hidden from `tabs`, so the window never closes), `BROJEV_NO_SPAWN=1` (clients never start or replace the daemon and `brojev stop` is refused; they fail if it is not running or runs another version. The daemon itself still accepts `shutdown` from any socket client), `BROJEV_HUMAN_CDP_URL` and `BROJEV_HUMAN_VIEW_URL` (see Human handoff), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
 ## Shared host daemon
 
@@ -141,6 +141,25 @@ BROJEV_HOME=/srv/brojev BROJEV_CDP_URL=http://127.0.0.1:9223 brojev daemon
 BROJEV_HOME=/srv/brojev BROJEV_NO_SPAWN=1 brojev mcp
 ```
 
+## Human handoff
+
+For steps a person must do (a CAPTCHA, a login, a 2FA code), brojev can hand the page to a visible Chrome the person reaches from their own browser through noVNC, then take the session back. The agent's browser stays whatever it is: brojev's own Chrome, a headless Chrome, or another CDP engine attached with `BROJEV_CDP_URL` (e.g. [Obscura](https://github.com/h4ckf0r0day/obscura), which cannot be shown over VNC because it has no display).
+
+```sh
+sudo apt install xvfb x11vnc novnc websockify     # Debian/Ubuntu
+scripts/human-browser.sh start                    # Xvfb + Chrome (DevTools on 127.0.0.1:9223) + x11vnc + noVNC on 127.0.0.1:6080
+# prints the view URL, a VNC password, and two lines for ~/.brojev/env:
+#   BROJEV_HUMAN_CDP_URL=http://127.0.0.1:9223
+#   BROJEV_HUMAN_VIEW_URL=http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+brojev stop                                       # the next call starts a daemon that sees them
+```
+
+- `handoff start [url]` copies all the agent's cookies, plus localStorage of the page's origin, into the person's Chrome and opens the page there (default: the current tab's URL). It returns `viewUrl` to give the person.
+- `handoff finish [url]` copies cookies and localStorage back, closes that tab and loads the page the person ended on, or `url`, in the agent's tab. If they ended on a form result, the reply says so: it was loaded again with GET.
+- `handoff status` shows whether a handoff is open and where the person is.
+
+Without `BROJEV_HUMAN_CDP_URL` the `handoff` tool is not listed and nothing else changes. brojev never launches or quits the person's Chrome. Every port in the script binds to 127.0.0.1: reach noVNC through an SSH tunnel (`ssh -L 6080:127.0.0.1:6080 host`) or a private network. Cookies some anti-bot services issue (e.g. `cf_clearance`) are tied to the IP address and User-Agent that solved the challenge, so they only carry over when both browsers share them.
+
 ## Tests
 
 ```sh
@@ -148,7 +167,7 @@ go test ./...                                     # unit tests
 BROJEV_E2E=1 go test ./internal/page/             # 15 browser tests on local fixtures, headless
 BROJEV_E2E=1 go test ./internal/agent/            # Jev loop against a fake Jev server
 BROJEV_E2E=1 go test ./internal/mcpserver/        # MCP client -> server -> daemon -> Chrome
-BROJEV_E2E=1 go test ./internal/daemon/           # BROJEV_CDP_URL against a Chrome the test runs
+BROJEV_E2E=1 go test ./internal/daemon/           # BROJEV_CDP_URL and handoff against Chromes the test runs
 brojev bench eval/tasks.json                      # live sites, real Jev (costs fractions of a cent)
 python3 eval/claude_bench.py --config brojev=a.json --config playwright=b.json   # inside Claude Code
 ```
@@ -159,7 +178,7 @@ python3 eval/claude_bench.py --config brojev=a.json --config playwright=b.json  
 - Supported on macOS and Linux (arm64, amd64). Windows is not supported yet.
 - Closed shadow roots, canvas apps and OS-level UI need the coordinate and screenshot tools.
 - Jev is weak at numbers and comparisons ("cheapest", counting, date arithmetic): Claude should do those from snapshots and pass exact values.
-- Captchas are handed to the human. brojev does not try to bypass bot protection.
+- Captchas are handed to the human (see Human handoff). brojev does not try to bypass bot protection.
 
 ## Credits
 
