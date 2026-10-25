@@ -372,10 +372,27 @@ func Call(ctx context.Context, method string, params, out any) error {
 	return nil
 }
 
+// NoSpawn is BROJEV_NO_SPAWN: this client only talks to a daemon someone
+// else runs (e.g. on the host, through a mounted socket) and never starts or
+// replaces one.
+func NoSpawn() bool { v := os.Getenv("BROJEV_NO_SPAWN"); return v != "" && v != "0" }
+
 // Ensure starts brojevd in the background if it is not answering.
 func Ensure(ctx context.Context, extraArgs ...string) error {
 	var ping struct {
 		Version string `json:"version"`
+	}
+	if NoSpawn() {
+		if err := Call(ctx, "ping", nil, &ping); err != nil {
+			return fmt.Errorf("brojev daemon not running at %s (BROJEV_NO_SPAWN is set, so it is not started here): %w", SocketPath(), err)
+		}
+		if ping.Version != version.Version {
+			if ping.Version == "" {
+				ping.Version = "unknown"
+			}
+			return fmt.Errorf("brojev daemon at %s is version %s but this client is %s (BROJEV_NO_SPAWN is set, so it is not replaced; restart the daemon with the matching binary)", SocketPath(), ping.Version, version.Version)
+		}
+		return nil
 	}
 	if Call(ctx, "ping", nil, &ping) == nil {
 		if ping.Version == version.Version {

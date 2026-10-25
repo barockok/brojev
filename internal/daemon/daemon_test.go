@@ -1,14 +1,20 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/barockok/brojev/internal/version"
 )
 
 func TestCDPURLGuard(t *testing.T) {
@@ -35,5 +41,85 @@ func TestCDPURLGuard(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "profile")); !os.IsNotExist(err) {
 		t.Fatalf("a Chrome profile dir was created: %v", err)
+	}
+}
+
+// fakeDaemon answers ping with ver on the socket and records every method.
+func fakeDaemon(t *testing.T, ver string) (methods func() []string) {
+	t.Helper()
+	ln, err := net.Listen("unix", SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close(); os.Remove(SocketPath()) })
+	var mu sync.Mutex
+	var seen []string
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				sc := bufio.NewScanner(c)
+				for sc.Scan() {
+					var req Request
+					json.Unmarshal(sc.Bytes(), &req)
+					mu.Lock()
+					seen = append(seen, req.Method)
+					mu.Unlock()
+					res, _ := json.Marshal(map[string]any{"pid": 1, "version": ver})
+					json.NewEncoder(c).Encode(Response{Result: res})
+				}
+			}()
+		}
+	}()
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
+}
+
+func TestNoSpawnWithoutDaemon(t *testing.T) {
+	t.Setenv("BROJEV_HOME", t.TempDir())
+	t.Setenv("BROJEV_NO_SPAWN", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := Ensure(ctx)
+	if err == nil || !strings.Contains(err.Error(), "brojev daemon not running") {
+		t.Fatalf("Ensure: err = %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if _, err := os.Stat(SocketPath()); !os.IsNotExist(err) {
+		t.Fatalf("a daemon socket appeared: %v", err)
+	}
+}
+
+func TestNoSpawnVersionMismatch(t *testing.T) {
+	t.Setenv("BROJEV_HOME", t.TempDir())
+	t.Setenv("BROJEV_NO_SPAWN", "1")
+	methods := fakeDaemon(t, "0.0.0-other")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := Ensure(ctx)
+	if err == nil || !strings.Contains(err.Error(), "0.0.0-other") || !strings.Contains(err.Error(), version.Version) {
+		t.Fatalf("Ensure: err = %v, want both versions", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := strings.Join(methods(), ","); got != "ping" {
+		t.Fatalf("requests = %q, want only ping (no shutdown)", got)
+	}
+}
+
+func TestNoSpawnSameVersion(t *testing.T) {
+	t.Setenv("BROJEV_HOME", t.TempDir())
+	t.Setenv("BROJEV_NO_SPAWN", "1")
+	fakeDaemon(t, version.Version)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := Ensure(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

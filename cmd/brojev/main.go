@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/barockok/brojev/internal/version"
@@ -567,19 +568,25 @@ func doctor() error {
 	case daemon.CDPURL() != "":
 		ep, err := chrome.EndpointFromURL(ctx, daemon.CDPURL())
 		check("chrome (external)", err, ep)
+	case daemon.NoSpawn():
+		fmt.Printf("  [skip] %-18s not needed here (BROJEV_NO_SPAWN: the daemon runs elsewhere)\n", "chrome binary")
 	default:
 		bin, err := chrome.Find()
 		check("chrome binary", err, bin)
 	}
 
-	err := daemon.Ensure(ctx)
+	err := daemon.Ensure(ctx) // with BROJEV_NO_SPAWN only pings
 	var ping struct {
-		PID int `json:"pid"`
+		PID     int    `json:"pid"`
+		Version string `json:"version"`
 	}
 	if err == nil {
 		err = daemon.Call(ctx, "ping", nil, &ping)
 	}
-	if !check("daemon", err, fmt.Sprintf("pid %d, %s", ping.PID, daemon.SocketPath())) {
+	if !check("daemon", err, fmt.Sprintf("pid %d, %s, %s", ping.PID, ping.Version, daemon.SocketPath())) {
+		if daemon.NoSpawn() {
+			return errors.New("daemon not reachable; BROJEV_NO_SPAWN is set, so start or fix it where it runs")
+		}
 		return fmt.Errorf("daemon not reachable; see %s", daemon.LogPath())
 	}
 
