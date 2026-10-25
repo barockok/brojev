@@ -122,7 +122,7 @@ brojev profile add me --dir "~/Library/Application Support/Google/Chrome" --chro
 brojev profile use work [--quit]                 # switch; --quit closes the previous profile's Chrome
 ```
 
-Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
+Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; profile switching is refused), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
 ## Tests
 
@@ -131,6 +131,7 @@ go test ./...                                     # unit tests
 BROJEV_E2E=1 go test ./internal/page/             # 15 browser tests on local fixtures, headless
 BROJEV_E2E=1 go test ./internal/agent/            # Jev loop against a fake Jev server
 BROJEV_E2E=1 go test ./internal/mcpserver/        # MCP client -> server -> daemon -> Chrome
+BROJEV_E2E=1 go test ./internal/daemon/           # BROJEV_CDP_URL against a Chrome the test runs
 brojev bench eval/tasks.json                      # live sites, real Jev (costs fractions of a cent)
 python3 eval/claude_bench.py --config brojev=a.json --config playwright=b.json   # inside Claude Code
 ```

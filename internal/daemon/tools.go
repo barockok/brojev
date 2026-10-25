@@ -217,7 +217,7 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 			s.cur = ""
 		}
 		s.mu.Unlock()
-		if err := b.CloseTab(ctx, id); err != nil {
+		if err := s.closeTab(ctx, b, id); err != nil {
 			return nil, err
 		}
 		return s.tabs(ctx, b)

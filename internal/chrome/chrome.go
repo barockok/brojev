@@ -3,9 +3,12 @@ package chrome
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,6 +63,54 @@ func ActiveEndpoint(profile string) (string, error) {
 	}
 	conn.Close()
 	return "ws://127.0.0.1:" + port + path, nil
+}
+
+// httpClient fetches /json/version; it never follows redirects, so the
+// endpoint cannot be bounced to another host.
+var httpClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// EndpointFromURL resolves the browser WebSocket URL of an already running
+// Chrome from its DevTools HTTP base (BROJEV_CDP_URL, e.g.
+// http://127.0.0.1:9223). Host and port come from base, the path from
+// /json/version: Chrome reports its own bind address there, which need not
+// be the address the caller reaches it on.
+func EndpointFromURL(ctx context.Context, base string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("BROJEV_CDP_URL %q: want an http or https URL like http://127.0.0.1:9222", base)
+	}
+	vurl := strings.TrimSuffix(base, "/") + "/json/version"
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vurl, nil)
+	if err != nil {
+		return "", fmt.Errorf("GET %s: %w", vurl, err)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GET %s: %w", vurl, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s: status %d", vurl, resp.StatusCode)
+	}
+	var v struct {
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		return "", fmt.Errorf("bad /json/version from %s: %w", vurl, err)
+	}
+	ws, err := url.Parse(v.WebSocketDebuggerURL)
+	if err != nil || v.WebSocketDebuggerURL == "" || ws.Path == "" {
+		return "", fmt.Errorf("no webSocketDebuggerUrl in /json/version from %s", vurl)
+	}
+	scheme := "ws"
+	if u.Scheme == "https" {
+		scheme = "wss"
+	}
+	return (&url.URL{Scheme: scheme, Host: u.Host, Path: ws.Path, RawQuery: ws.RawQuery}).String(), nil
 }
 
 type Options struct {

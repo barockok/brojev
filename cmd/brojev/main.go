@@ -563,10 +563,16 @@ func doctor() error {
 	fmt.Println("brojev doctor")
 	fmt.Printf("  home               %s\n", daemon.Home())
 
-	bin, err := chrome.Find()
-	check("chrome binary", err, bin)
+	switch {
+	case daemon.CDPURL() != "":
+		ep, err := chrome.EndpointFromURL(ctx, daemon.CDPURL())
+		check("chrome (external)", err, ep)
+	default:
+		bin, err := chrome.Find()
+		check("chrome binary", err, bin)
+	}
 
-	err = daemon.Ensure(ctx)
+	err := daemon.Ensure(ctx)
 	var ping struct {
 		PID int `json:"pid"`
 	}

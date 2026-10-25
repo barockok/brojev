@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -151,10 +152,20 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 	}
 }
 
+// CDPURL is BROJEV_CDP_URL: the DevTools HTTP base of a Chrome someone else
+// runs. When set, brojev attaches to it and never launches, quits or
+// relaunches it.
+func CDPURL() string { return os.Getenv("BROJEV_CDP_URL") }
+
+var errExternalChrome = errors.New("BROJEV_CDP_URL is set: brojev does not manage this Chrome")
+
 // conn returns the live browser, (re)connecting and launching Chrome if needed.
 func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if base := CDPURL(); base != "" {
+		return s.connExternalLocked(ctx, base)
+	}
 	prof, err := ActiveProfile()
 	if err != nil {
 		return nil, err
@@ -194,6 +205,67 @@ func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 	s.pages, s.cur = map[target.ID]*page.Page{}, ""
 	s.browser = b
 	return b, nil
+}
+
+// connExternalLocked attaches to the Chrome at base, resolving its endpoint
+// again on every reconnect (a restarted Chrome gets a new browser id).
+func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.Browser, error) {
+	if s.browser != nil {
+		select {
+		case <-s.browser.Done():
+			s.dropLocked() // Chrome restarted or the socket dropped
+		default:
+			return s.browser, nil
+		}
+	}
+	ep, err := chrome.EndpointFromURL(ctx, base)
+	if err != nil {
+		return nil, err
+	}
+	b, err := browser.Connect(ctx, ep)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("attached to %s (external Chrome)", base)
+	s.prof = profile.Profile{Name: "external", Dir: base}
+	if err := b.EnableDownloads(ctx, filepath.Join(Home(), "downloads")); err != nil {
+		log.Printf("downloads: %v", err)
+	}
+	s.pages, s.cur = map[target.ID]*page.Page{}, ""
+	s.browser = b
+	return b, nil
+}
+
+// closeTab closes a tab. On an external Chrome the last tab is replaced by a
+// blank one first, since closing the last window can end a headful Chrome,
+// and the close is awaited (Target.closeTarget returns before the tab is
+// gone) so the next close counts tabs correctly.
+func (s *Server) closeTab(ctx context.Context, b *browser.Browser, id target.ID) error {
+	if CDPURL() == "" {
+		return b.CloseTab(ctx, id)
+	}
+	pages, err := b.Pages(ctx)
+	if err != nil {
+		return err
+	}
+	if len(pages) == 1 && pages[0].TargetID == id {
+		if _, err := b.Open(ctx, "about:blank"); err != nil {
+			return err
+		}
+	}
+	if err := b.CloseTab(ctx, id); err != nil {
+		return err
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		pages, err := b.Pages(ctx)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(pages, func(p *target.Info) bool { return p.TargetID == id }) {
+			return nil
+		}
+	}
+	return nil
 }
 
 // dropLocked forgets the live connection (Chrome itself keeps running).
@@ -262,7 +334,7 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.TargetID == "" {
 			return nil, errors.New("close: params.targetId required")
 		}
-		return map[string]bool{"ok": true}, b.CloseTab(ctx, target.ID(p.TargetID))
+		return map[string]bool{"ok": true}, s.closeTab(ctx, b, target.ID(p.TargetID))
 	}
 	return nil, fmt.Errorf("unknown method %q", req.Method)
 }

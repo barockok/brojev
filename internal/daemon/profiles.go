@@ -42,6 +42,9 @@ func (s *Server) profileTool(ctx context.Context, raw json.RawMessage) (any, err
 	case "", "list":
 		return s.profileList(cfg)
 	case "current":
+		if base := CDPURL(); base != "" {
+			return map[string]any{"name": "external", "cdpUrl": base, "note": errExternalChrome.Error()}, nil
+		}
 		p, err := ActiveProfile()
 		if err != nil {
 			return nil, err
@@ -82,6 +85,9 @@ func (s *Server) profileTool(ctx context.Context, raw json.RawMessage) (any, err
 		}
 		return s.profileList(cfg)
 	case "use":
+		if CDPURL() != "" {
+			return nil, errExternalChrome
+		}
 		if a.Name == "" {
 			return nil, errors.New("profile use: name required")
 		}
