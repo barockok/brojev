@@ -162,6 +162,17 @@ func TestCDPURLEndToEnd(t *testing.T) {
 		}
 		return g[0]
 	}
+	statusGuard := func() string {
+		t.Helper()
+		var st struct {
+			GuardTab string `json:"guardTab"`
+		}
+		if err := Call(ctx, "status", nil, &st); err != nil || st.GuardTab == "" {
+			t.Fatalf("status guardTab: %q %v", st.GuardTab, err)
+		}
+		return st.GuardTab
+	}
+	const recheck = 2100 * time.Millisecond // EnsureGuard skips a guard confirmed < 2 s ago
 
 	for _, title := range []string{"cdp one", "cdp two", "cdp three", "cdp four"} {
 		open(title)
@@ -170,6 +181,45 @@ func TestCDPURLEndToEnd(t *testing.T) {
 		t.Fatalf("profile use: %v", err)
 	}
 	guard := oneGuard()
+	if statusGuard() != guard {
+		t.Fatal("status reports another guard")
+	}
+
+	// A page that navigates itself to the marker URL is neither adopted nor closed.
+	var imp browser.PageInfo
+	if err := Call(ctx, "tab_new", map[string]string{"url": "data:text/html,<title>impostor</title>"}, &imp); err != nil {
+		t.Fatal(err)
+	}
+	// A refused tab_close on the guard leaves the driven tab alone.
+	if err := Call(ctx, "tab_close", map[string]string{"targetId": guard}, nil); err == nil {
+		t.Fatal("tab_close on the guard succeeded")
+	}
+	for _, tab := range listTabs() {
+		if tab.TargetID == imp.TargetID && !tab.Current {
+			t.Fatal("refused tab_close cleared the current tab")
+		}
+	}
+	if err := Call(ctx, "eval", map[string]string{"js": "location.href = '" + browser.GuardURL + "'"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40 && len(guards(t, base)) < 2; i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(recheck)
+	listed := false
+	for _, tab := range listTabs() {
+		listed = listed || tab.TargetID == imp.TargetID
+	}
+	if !listed || len(guards(t, base)) != 2 || statusGuard() != guard {
+		t.Fatalf("impostor: listed=%v guards=%v status guard=%s want %s", listed, guards(t, base), statusGuard(), guard)
+	}
+	if err := Call(ctx, "close", map[string]string{"targetId": imp.TargetID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40 && len(guards(t, base)) > 1; i++ { // closeTarget is asynchronous
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	tabs := listTabs()
 	for _, tab := range tabs {
 		if tab.TargetID == guard {
@@ -207,7 +257,7 @@ func TestCDPURLEndToEnd(t *testing.T) {
 	if left := listTabs(); len(left) != 0 {
 		t.Fatalf("tabs left: %v", left)
 	}
-	if oneGuard() != guard {
+	if oneGuard() != guard || statusGuard() != guard {
 		t.Fatal("guard tab changed")
 	}
 
@@ -218,6 +268,7 @@ func TestCDPURLEndToEnd(t *testing.T) {
 	for i := 0; i < 40 && len(guards(t, base)) > 0; i++ {
 		time.Sleep(50 * time.Millisecond)
 	}
+	time.Sleep(recheck)
 	listTabs()
 	if g := oneGuard(); g == guard {
 		t.Fatal("guard was not recreated")

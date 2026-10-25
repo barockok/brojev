@@ -118,6 +118,9 @@ func (s *Server) current(ctx context.Context, b *browser.Browser) (*page.Page, e
 // render background tabs, so their input is not hit-tested and their JS
 // dialogs are deferred.
 func (s *Server) use(ctx context.Context, b *browser.Browser, id target.ID) (*page.Page, error) {
+	if b.IsGuard(id) {
+		return nil, browser.ErrGuardTab
+	}
 	s.mu.Lock()
 	if p := s.pages[id]; p != nil {
 		changed := s.cur != id
@@ -207,6 +210,9 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 			s.mu.Lock()
 			id = s.cur
 			s.mu.Unlock()
+		}
+		if b.IsGuard(id) {
+			return nil, browser.ErrGuardTab
 		}
 		s.mu.Lock()
 		if p := s.pages[id]; p != nil {

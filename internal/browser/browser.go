@@ -22,11 +22,12 @@ type Browser struct {
 	Endpoint string
 	conn     *cdp.Conn
 
-	mu    sync.Mutex
-	tabs  map[target.ID]*Tab
-	dl    *downloads
-	tabMu sync.Mutex // serializes creating and closing tabs
-	guard target.ID  // see EnsureGuard; hidden from Pages, never attached or closed
+	mu      sync.Mutex
+	tabs    map[target.ID]*Tab
+	dl      *downloads
+	tabMu   sync.Mutex // serializes creating and closing tabs
+	guard   target.ID  // see EnsureGuard; hidden from Pages, never attached or closed
+	guardOK time.Time  // when guard was last seen alive
 }
 
 // GuardURL marks the guard tab, so a restarted daemon adopts it instead of
@@ -35,49 +36,79 @@ const GuardURL = "about:blank#brojev-guard"
 
 var ErrGuardTab = errors.New("that is brojev's guard tab: it keeps the external Chrome's window open, so brojev does not drive or close it")
 
-// EnsureGuard keeps exactly one guard tab open (BROJEV_CDP_URL mode): an
-// idle about:blank tab brojev owns, so closing every other tab (or a page
-// calling window.close()) never closes the last window of a Chrome brojev
-// does not manage. It adopts an existing guard, recreates a closed one, and
-// closes extra guards.
+// EnsureGuard keeps one guard tab open (BROJEV_CDP_URL mode): an idle
+// about:blank tab brojev owns, so closing every other tab (or a page calling
+// window.close()) never closes the last window of a Chrome brojev does not
+// manage.
+//
+// Once a guard is known it is identified by target id only; if it is gone a
+// new one is created. The marker URL is trusted only for adoption, on the
+// first call of a connection (daemon or Chrome restart), because any page can
+// navigate itself to it: then the first unattached tab at GuardURL is adopted
+// and other unattached ones at GuardURL are closed. A guard confirmed within
+// the last 2 s is not checked again.
 func (b *Browser) EnsureGuard(ctx context.Context) error {
 	b.tabMu.Lock()
 	defer b.tabMu.Unlock()
+	b.mu.Lock()
+	cur, fresh := b.guard, time.Since(b.guardOK) < 2*time.Second
+	b.mu.Unlock()
+	if cur != "" && fresh {
+		return nil
+	}
 	res, err := cdproto.Call(ctx, b.conn.Browser(), target.GetTargets, target.GetTargetsParams{})
 	if err != nil {
 		return err
 	}
-	b.mu.Lock()
-	cur := b.guard
-	b.mu.Unlock()
-	var guards []target.ID
+	var guard target.ID
+	var extras []target.ID
 	for _, t := range res.TargetInfos {
-		if t.Type == "page" && (t.TargetID == cur || t.URL == GuardURL) {
-			if t.TargetID == cur { // the recorded one wins
-				guards = append([]target.ID{t.TargetID}, guards...)
+		if t.Type != "page" {
+			continue
+		}
+		if cur != "" {
+			if t.TargetID == cur {
+				guard = cur
+			}
+			continue
+		}
+		b.mu.Lock()
+		_, attached := b.tabs[t.TargetID]
+		b.mu.Unlock()
+		if t.URL == GuardURL && !attached {
+			if guard == "" {
+				guard = t.TargetID
 			} else {
-				guards = append(guards, t.TargetID)
+				extras = append(extras, t.TargetID)
 			}
 		}
 	}
-	if len(guards) == 0 {
+	if guard == "" {
 		no, yes := false, true
 		created, err := cdproto.Call(ctx, b.conn.Browser(), target.CreateTarget, target.CreateTargetParams{URL: GuardURL, Background: &yes, Focus: &no})
 		if err != nil {
 			return fmt.Errorf("guard tab: %w", err)
 		}
-		guards = []target.ID{created.TargetID}
+		guard = created.TargetID
 	}
-	for _, id := range guards[1:] {
+	for _, id := range extras {
 		_, _ = cdproto.Call(ctx, b.conn.Browser(), target.CloseTarget, target.CloseTargetParams{TargetID: id})
 	}
 	b.mu.Lock()
-	b.guard = guards[0]
+	b.guard, b.guardOK = guard, time.Now()
+	delete(b.tabs, guard)
 	b.mu.Unlock()
 	return nil
 }
 
-func (b *Browser) isGuard(id target.ID) bool {
+// Guard is the guard tab's id ("" when there is none).
+func (b *Browser) Guard() target.ID {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.guard
+}
+
+func (b *Browser) IsGuard(id target.ID) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.guard != "" && id == b.guard
@@ -113,7 +144,7 @@ func (b *Browser) Pages(ctx context.Context) ([]*target.Info, error) {
 	}
 	var pages []*target.Info
 	for _, t := range res.TargetInfos {
-		if t.Type == "page" && !b.isGuard(t.TargetID) {
+		if t.Type == "page" && !b.IsGuard(t.TargetID) {
 			pages = append(pages, t)
 		}
 	}
@@ -122,7 +153,7 @@ func (b *Browser) Pages(ctx context.Context) ([]*target.Info, error) {
 
 // Attach returns the tab's session, attaching once per target.
 func (b *Browser) Attach(ctx context.Context, id target.ID) (*Tab, error) {
-	if b.isGuard(id) {
+	if b.IsGuard(id) {
 		return nil, ErrGuardTab
 	}
 	b.mu.Lock()
@@ -190,7 +221,7 @@ func (b *Browser) Forget(id target.ID) {
 }
 
 func (b *Browser) CloseTab(ctx context.Context, id target.ID) error {
-	if b.isGuard(id) {
+	if b.IsGuard(id) {
 		return ErrGuardTab
 	}
 	b.tabMu.Lock()

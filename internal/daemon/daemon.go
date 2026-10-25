@@ -216,7 +216,8 @@ func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.
 		case <-s.browser.Done():
 			s.dropLocked() // Chrome restarted or the socket dropped
 		default:
-			return s.browser, s.browser.EnsureGuard(ctx)
+			s.ensureGuardLocked(ctx, s.browser)
+			return s.browser, nil
 		}
 	}
 	ep, err := chrome.EndpointFromURL(ctx, base)
@@ -225,10 +226,6 @@ func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.
 	}
 	b, err := browser.Connect(ctx, ep)
 	if err != nil {
-		return nil, err
-	}
-	if err := b.EnsureGuard(ctx); err != nil {
-		b.Close()
 		return nil, err
 	}
 	log.Printf("attached to %s (external Chrome)", chrome.RedactURL(base))
@@ -241,7 +238,25 @@ func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.
 	}
 	s.pages, s.cur = map[target.ID]*page.Page{}, ""
 	s.browser = b
+	s.ensureGuardLocked(ctx, b)
 	return b, nil
+}
+
+// ensureGuardLocked keeps the guard tab and makes sure the daemon never
+// drives it. A failure is logged, not returned: the call itself may still work.
+func (s *Server) ensureGuardLocked(ctx context.Context, b *browser.Browser) {
+	if err := b.EnsureGuard(ctx); err != nil {
+		log.Printf("guard tab: %v", err)
+		return
+	}
+	g := b.Guard()
+	if p := s.pages[g]; p != nil {
+		p.Close()
+		delete(s.pages, g)
+	}
+	if s.cur == g {
+		s.cur = ""
+	}
 }
 
 // dropLocked forgets the live connection (Chrome itself keeps running).
@@ -290,11 +305,15 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{
+		out := map[string]any{
 			"product": v.Product, "protocol": v.ProtocolVersion, "endpoint": b.Endpoint,
 			"profile": s.prof.Name, "profileDir": s.prof.Dir, "chromeProfile": s.prof.ChromeProfile, "attach": s.prof.Attach,
 			"tabs": len(pages), "pid": os.Getpid(),
-		}, nil
+		}
+		if g := b.Guard(); g != "" {
+			out["guardTab"] = g
+		}
+		return out, nil
 	case "open":
 		var p struct {
 			URL string `json:"url"`
