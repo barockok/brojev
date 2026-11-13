@@ -17,6 +17,7 @@ type BatchStep struct {
 }
 
 type BatchIn struct {
+	Sess
 	Steps           []BatchStep `json:"steps" jsonschema:"actions to run in order (max 50)"`
 	ContinueOnError bool        `json:"continueOnError,omitempty" jsonschema:"keep going after a failed step (default: stop at the first failure)"`
 	Snapshot        *bool       `json:"snapshot,omitempty" jsonschema:"return a fresh snapshot after the last step (default true)"`
@@ -86,6 +87,9 @@ func batchTool(ctx context.Context, _ *mcp.CallToolRequest, in BatchIn) (*mcp.Ca
 		for k, v := range s.Args {
 			params[k] = v
 		}
+		if in.Session != "" {
+			params["session"] = in.Session
+		}
 		if !plains[i] {
 			params["snapshot"] = false
 		}
@@ -116,7 +120,7 @@ func batchTool(ctx context.Context, _ *mcp.CallToolRequest, in BatchIn) (*mcp.Ca
 	}
 
 	if in.Snapshot == nil || *in.Snapshot {
-		raw, err := call(ctx, "snapshot", map[string]any{})
+		raw, err := call(ctx, "snapshot", map[string]any{"session": in.Session})
 		if err != nil {
 			fmt.Fprintf(&b, "snapshot failed: %v\n", err)
 		} else {

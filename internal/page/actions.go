@@ -682,8 +682,14 @@ func attr(attrs []string, name string) string {
 	return ""
 }
 
-// Front makes this the active tab of its window.
+// Front makes this the active tab of its window. A tab that is already
+// showing is left alone: Page.bringToFront also raises Chrome over whatever
+// app the user is working in (macOS), and with one window per session the
+// driven tab is normally already the front tab of its own window.
 func (p *Page) Front(ctx context.Context) error {
+	if v, err := p.Eval(ctx, `document.visibilityState`); err == nil && string(v) == `"visible"` {
+		return nil
+	}
 	_, err := cdproto.Call(ctx, p.S, cdppage.BringToFront, cdproto.Empty{})
 	return err
 }

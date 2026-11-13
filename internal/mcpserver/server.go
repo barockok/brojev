@@ -4,11 +4,14 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/barockok/brojev/internal/version"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -30,9 +33,55 @@ func New() *mcp.Server {
 const instructions = `brojev drives a dedicated Chrome profile (logins persist there).
 Fast path: call run with a concrete goal (and values you already know); it executes the whole sub-task in a few seconds and returns the final page.
 Use the primitive tools (snapshot, click, type, ...) when run returns needs_claude/blocked, for canvas or unusual widgets, or for exact control.
-Refs like e12 / f2e5 come from the latest snapshot; take a new one if a ref is stale.`
+A blocked or needs_claude result is a hand-off, not the end: do that step yourself, then resume run, and keep going until the task is verifiably done or stops making progress.
+Refs like e12 / f2e5 come from the latest snapshot; take a new one if a ref is stale.
+Other Claude sessions may use the browser at the same time; you only see and touch your own tabs. If you run in parallel with other agents inside one session (subagents), pass a short unique "session" name on every call to get your own window.`
 
 type empty struct{}
+
+// Sess is embedded in every tool input. Claude Code subagents share this
+// process, so without it they would share one browser tab.
+type Sess struct {
+	Session string `json:"session,omitempty" jsonschema:"only for parallel subagents: pick a short unique name (e.g. 'research-1') so this subagent gets its own browser window and tabs; reuse the same name on every call. Omit if you are the only one using the browser."`
+}
+
+// sessionID names this brojev-mcp process to the daemon. A Claude Code
+// session keeps one id across an /mcp reconnect, so it finds its window again.
+var sessionID = func() string {
+	if v := os.Getenv("BROJEV_SESSION"); v != "" {
+		return v
+	}
+	if v := os.Getenv("CLAUDE_CODE_SESSION_ID"); v != "" {
+		return v
+	}
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return "mcp-" + hex.EncodeToString(b[:])
+}()
+
+var lease struct {
+	sync.Mutex
+	l *daemon.LeaseConn
+}
+
+// holdLease keeps one connection open to the daemon so it knows this process
+// is alive, and re-opens it after a daemon restart. Best effort: without it
+// sessions are simply never cleaned up.
+func holdLease(ctx context.Context) {
+	lease.Lock()
+	defer lease.Unlock()
+	if lease.l != nil {
+		select {
+		case <-lease.l.Done():
+			lease.l = nil
+		default:
+			return
+		}
+	}
+	if l, err := daemon.Lease(ctx, sessionID); err == nil {
+		lease.l = l
+	}
+}
 
 func call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
@@ -40,17 +89,18 @@ func call(ctx context.Context, method string, params any) (json.RawMessage, erro
 	if err := daemon.Ensure(ctx); err != nil {
 		return nil, err
 	}
+	holdLease(ctx)
 	if method == "run" {
 		// The daemon may predate this session: hand it the keys Claude Code
 		// passed us (plugin userConfig), which win over ~/.brojev/env.
 		if keys := daemon.KeyEnv(); len(keys) > 0 {
-			if err := daemon.Call(ctx, "keys", keys, nil); err != nil {
+			if err := daemon.CallAs(ctx, sessionID, "keys", keys, nil); err != nil {
 				return nil, err
 			}
 		}
 	}
 	var out json.RawMessage
-	err := daemon.Call(ctx, method, params, &out)
+	err := daemon.CallAs(ctx, sessionID, method, params, &out)
 	return out, err
 }
 
@@ -151,6 +201,7 @@ func renderAction(method string, raw json.RawMessage) string {
 // ---- inputs ----
 
 type RunIn struct {
+	Sess
 	Goal          string            `json:"goal" jsonschema:"one concrete sub-task in natural language, e.g. 'Search flights Zurich to London one-way on 20 November 2026 and stop when results show'"`
 	URL           string            `json:"url,omitempty" jsonschema:"start URL; omit to continue on the current page"`
 	Values        map[string]string `json:"values,omitempty" jsonschema:"field values you already know, e.g. {\"origin\":\"Zurich\",\"date\":\"2026-11-20\"}; makes typing exact and faster"`
@@ -162,16 +213,19 @@ type RunIn struct {
 }
 
 type SnapshotIn struct {
+	Sess
 	MaxElements  int `json:"maxElements,omitempty" jsonschema:"cap on listed elements (default 600)"`
 	MaxOffscreen int `json:"maxOffscreen,omitempty" jsonschema:"cap on offscreen elements (default 150)"`
 	MaxText      int `json:"maxText,omitempty" jsonschema:"cap on visible text characters (default 6000, -1 for none)"`
 }
 
 type NavigateIn struct {
+	Sess
 	URL string `json:"url" jsonschema:"URL to load in the current tab"`
 }
 
 type ClickIn struct {
+	Sess
 	Ref       string   `json:"ref,omitempty" jsonschema:"element ref from the snapshot, e.g. e12 or f2e5"`
 	X         *float64 `json:"x,omitempty" jsonschema:"viewport x (CSS px) when there is no ref, e.g. canvas"`
 	Y         *float64 `json:"y,omitempty" jsonschema:"viewport y (CSS px)"`
@@ -182,6 +236,7 @@ type ClickIn struct {
 }
 
 type TypeIn struct {
+	Sess
 	Ref      string `json:"ref" jsonschema:"text field ref"`
 	Text     string `json:"text" jsonschema:"text to enter; replaces the field content unless append is set. Date/time/color inputs take their native format, e.g. 2026-11-20"`
 	Append   bool   `json:"append,omitempty" jsonschema:"keep existing content"`
@@ -190,23 +245,27 @@ type TypeIn struct {
 }
 
 type SelectIn struct {
+	Sess
 	Ref      string   `json:"ref" jsonschema:"native <select> ref"`
 	Values   []string `json:"values" jsonschema:"option values or labels"`
 	Snapshot *bool    `json:"snapshot,omitempty"`
 }
 
 type RefIn struct {
+	Sess
 	Ref      string `json:"ref" jsonschema:"element ref"`
 	Snapshot *bool  `json:"snapshot,omitempty"`
 }
 
 type KeyIn struct {
+	Sess
 	Combo    string `json:"combo,omitempty" jsonschema:"key or combo for the focused element, e.g. Enter, Escape, Tab, ArrowDown, Shift+Tab, ControlOrMeta+A"`
 	Text     string `json:"text,omitempty" jsonschema:"instead of combo: type this text key by key into the focused element"`
 	Snapshot *bool  `json:"snapshot,omitempty"`
 }
 
 type ScrollIn struct {
+	Sess
 	Ref      string   `json:"ref,omitempty" jsonschema:"scroll inside this element (nested scroller); omit for the page"`
 	X        *float64 `json:"x,omitempty"`
 	Y        *float64 `json:"y,omitempty"`
@@ -216,6 +275,7 @@ type ScrollIn struct {
 }
 
 type DragIn struct {
+	Sess
 	From     string   `json:"from,omitempty" jsonschema:"ref to drag"`
 	To       string   `json:"to,omitempty" jsonschema:"ref to drop onto"`
 	X        *float64 `json:"x,omitempty" jsonschema:"start x when not using refs"`
@@ -226,42 +286,51 @@ type DragIn struct {
 }
 
 type UploadIn struct {
+	Sess
 	Ref      string   `json:"ref" jsonschema:"file input, or a button that opens a file chooser"`
 	Files    []string `json:"files" jsonschema:"absolute file paths"`
 	Snapshot *bool    `json:"snapshot,omitempty"`
 }
 
 type DialogIn struct {
+	Sess
 	Accept *bool  `json:"accept,omitempty" jsonschema:"true = OK, false = Cancel; omit to just read the open dialog"`
 	Text   string `json:"text,omitempty" jsonschema:"answer for a prompt() dialog"`
 }
 
 type WaitIn struct {
+	Sess
 	Text      string `json:"text" jsonschema:"text to wait for (any frame)"`
 	Gone      bool   `json:"gone,omitempty" jsonschema:"wait for the text to disappear instead"`
 	TimeoutMS int    `json:"timeoutMs,omitempty" jsonschema:"default 10000"`
 }
 
 type EvalIn struct {
+	Sess
 	JS string `json:"js" jsonschema:"JavaScript expression evaluated in the page (promises are awaited); returns JSON"`
 }
 
 type TabsIn struct {
+	Sess
 	Action   string `json:"action,omitempty" jsonschema:"list (default), new, switch, close"`
 	TargetID string `json:"targetId,omitempty" jsonschema:"tab id for switch/close (close defaults to the current tab)"`
 	URL      string `json:"url,omitempty" jsonschema:"URL for new"`
+	Shared   bool   `json:"shared,omitempty" jsonschema:"switch/close: allow a tab that belongs to another session (default: you only see and touch your own tabs)"`
 }
 
 type HistoryIn struct {
+	Sess
 	Action   string `json:"action" jsonschema:"back, forward or reload"`
 	Snapshot *bool  `json:"snapshot,omitempty"`
 }
 
 type ScreenshotIn struct {
+	Sess
 	Full bool `json:"full,omitempty" jsonschema:"capture the full page instead of the viewport"`
 }
 
 type EmulateIn struct {
+	Sess
 	Device      string   `json:"device,omitempty" jsonschema:"preset: iphone-15, pixel-8, ipad, desktop, desktop-hd"`
 	Reset       bool     `json:"reset,omitempty" jsonschema:"clear all overrides first"`
 	Width       int      `json:"width,omitempty"`
@@ -285,9 +354,11 @@ type ProfileIn struct {
 	ChromeProfile string `json:"chromeProfile,omitempty" jsonschema:"add: person inside the data dir, e.g. Default or Profile 3 (list them with action=chrome-profiles)"`
 	Attach        bool   `json:"attach,omitempty" jsonschema:"add: connect via chrome://inspect remote debugging (needed for the real Chrome dir; avoids navigator.webdriver)"`
 	Quit          bool   `json:"quit,omitempty" jsonschema:"use: also close the previous profile's Chrome"`
+	Force         bool   `json:"force,omitempty" jsonschema:"use: switch even though other Claude sessions are using the browser (they lose their tabs)"`
 }
 
 type StateIn struct {
+	Sess
 	Action string `json:"action" jsonschema:"save or load"`
 	Path   string `json:"path,omitempty" jsonschema:"JSON file (default ~/.brojev/state.json)"`
 }
@@ -459,7 +530,7 @@ func screenshotTool(ctx context.Context, _ *mcp.CallToolRequest, in ScreenshotIn
 
 func emulateTool(ctx context.Context, req *mcp.CallToolRequest, in EmulateIn) (*mcp.CallToolResult, any, error) {
 	if len(in.Permissions) > 0 {
-		if _, err := call(ctx, "grant", map[string]any{"permissions": in.Permissions}); err != nil {
+		if _, err := call(ctx, "grant", map[string]any{"permissions": in.Permissions, "session": in.Session}); err != nil {
 			return fail(err), nil, nil
 		}
 	}
