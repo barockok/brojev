@@ -52,6 +52,7 @@ type Params struct {
 	Permissions []string `json:"permissions,omitempty"`
 	Path        string   `json:"path,omitempty"`
 	MaxText     int      `json:"maxText,omitempty"`
+	Shared      bool     `json:"shared,omitempty"` // tab_switch/tab_close: allow a tab of another session
 }
 
 type TabInfo struct {
@@ -76,13 +77,14 @@ var pageTools = map[string]bool{
 	"emulate": true, "grant": true, "state_save": true, "state_load": true,
 }
 
-// current returns the page brojev is driving, attaching to a tab if needed.
-func (s *Server) current(ctx context.Context, b *browser.Browser) (*page.Page, error) {
+// current returns the page sess is driving, giving it a tab if needed.
+func (s *Server) current(ctx context.Context, b *browser.Browser, sess *session) (*page.Page, error) {
 	s.mu.Lock()
-	cur := s.cur
+	cur := sess.cur
 	p := s.pages[cur]
 	s.mu.Unlock()
-	pages, err := b.Pages(ctx)
+	attached := s.keepTabs()
+	pages, err := s.sessionPages(ctx, b, sess)
 	if err != nil {
 		return nil, err
 	}
@@ -95,38 +97,59 @@ func (s *Server) current(ctx context.Context, b *browser.Browser) (*page.Page, e
 	if p != nil && alive {
 		return p, nil
 	}
+	front := true
 	if !alive {
-		s.mu.Lock()
-		attached := s.prof.Attach
-		s.mu.Unlock()
-		// On an attached (personal) browser never take over one of the
-		// user's tabs: brojev works in a tab of its own.
-		if len(pages) == 0 || attached {
+		switch {
+		case !sess.isDefault():
+			// A named session never adopts a tab it did not open: it gets a
+			// window of its own, which is already the front tab of that window.
+			info, err := s.openFor(ctx, b, sess, "about:blank")
+			if err != nil {
+				return nil, err
+			}
+			cur, front = target.ID(info.TargetID), false
+		case len(pages) == 0 || attached:
+			// On an attached (personal) browser never take over one of the
+			// user's tabs: brojev works in a tab of its own.
 			info, err := b.Open(ctx, "about:blank")
 			if err != nil {
 				return nil, err
 			}
 			cur = target.ID(info.TargetID)
-		} else {
+		default:
 			cur = pages[0].TargetID
 		}
 	}
-	return s.use(ctx, b, cur)
+	return s.use(ctx, b, sess, cur, front)
 }
 
-// use makes id the driven tab and brings it to the front: Chrome does not
-// render background tabs, so their input is not hit-tested and their JS
-// dialogs are deferred.
-func (s *Server) use(ctx context.Context, b *browser.Browser, id target.ID) (*page.Page, error) {
+// openFor opens a tab for sess: a window of its own for a named session, a
+// background tab for the default session.
+func (s *Server) openFor(ctx context.Context, b *browser.Browser, sess *session, url string) (*browser.PageInfo, error) {
+	if sess.isDefault() {
+		return b.Open(ctx, url)
+	}
+	info, err := b.OpenWindow(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	s.claim(sess, target.ID(info.TargetID))
+	return info, nil
+}
+
+// use makes id the driven tab of sess and, when front is set, brings it to
+// the front of its window: Chrome does not render background tabs, so their
+// input is not hit-tested and their JS dialogs are deferred.
+func (s *Server) use(ctx context.Context, b *browser.Browser, sess *session, id target.ID, front bool) (*page.Page, error) {
 	if b.IsGuard(id) {
 		return nil, browser.ErrGuardTab
 	}
 	s.mu.Lock()
 	if p := s.pages[id]; p != nil {
-		changed := s.cur != id
-		s.cur = id
+		changed := sess.cur != id
+		sess.cur = id
 		s.mu.Unlock()
-		if changed {
+		if changed && front {
 			p.Front(ctx)
 		}
 		return p, nil
@@ -150,19 +173,21 @@ func (s *Server) use(ctx context.Context, b *browser.Browser, id target.ID) (*pa
 	} else {
 		s.pages[id] = p
 	}
-	s.cur = id
+	sess.cur = id
 	s.mu.Unlock()
-	p.Front(ctx)
+	if front {
+		p.Front(ctx)
+	}
 	return p, nil
 }
 
-func (s *Server) tabs(ctx context.Context, b *browser.Browser) ([]TabInfo, error) {
-	pages, err := b.Pages(ctx)
+func (s *Server) tabs(ctx context.Context, b *browser.Browser, sess *session) ([]TabInfo, error) {
+	pages, err := s.sessionPages(ctx, b, sess)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	cur := s.cur
+	cur := sess.cur
 	s.mu.Unlock()
 	out := make([]TabInfo, 0, len(pages))
 	for _, t := range pages {
@@ -171,7 +196,7 @@ func (s *Server) tabs(ctx context.Context, b *browser.Browser) ([]TabInfo, error
 	return out, nil
 }
 
-func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string, raw json.RawMessage) (any, error) {
+func (s *Server) pageTool(ctx context.Context, b *browser.Browser, sess *session, method string, raw json.RawMessage) (any, error) {
 	var a Params
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -180,7 +205,7 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 	}
 	switch method { // tools that do not need a current page
 	case "tabs":
-		return s.tabs(ctx, b)
+		return s.tabs(ctx, b, sess)
 	case "downloads":
 		return b.Downloads(), nil
 	case "tab_new":
@@ -188,11 +213,11 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 		if url == "" {
 			url = "about:blank"
 		}
-		info, err := b.Open(ctx, url)
+		info, err := s.openFor(ctx, b, sess, url)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := s.use(ctx, b, target.ID(info.TargetID)); err != nil {
+		if _, err := s.use(ctx, b, sess, target.ID(info.TargetID), sess.isDefault()); err != nil {
 			return nil, err
 		}
 		return info, nil
@@ -200,36 +225,55 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 		if a.TargetID == "" {
 			return nil, errors.New("tab_switch: targetId required")
 		}
-		if _, err := s.use(ctx, b, target.ID(a.TargetID)); err != nil {
+		if !s.canTouch(sess, target.ID(a.TargetID), a.Shared) {
+			return nil, errNotYours
+		}
+		if _, err := s.use(ctx, b, sess, target.ID(a.TargetID), true); err != nil {
 			return nil, err
 		}
-		return s.tabs(ctx, b)
+		return s.tabs(ctx, b, sess)
 	case "tab_close":
 		id := target.ID(a.TargetID)
 		if id == "" {
 			s.mu.Lock()
-			id = s.cur
+			id = sess.cur
 			s.mu.Unlock()
 		}
 		if b.IsGuard(id) {
 			return nil, browser.ErrGuardTab
+		}
+		attached := s.keepTabs()
+		if !s.canTouch(sess, id, a.Shared) {
+			return nil, errNotYours
+		}
+		if attached {
+			// The user's own Chrome: never close a tab another session opened.
+			s.mu.Lock()
+			o := s.owner[id]
+			s.mu.Unlock()
+			if o != "" && o != sess.id {
+				return nil, errors.New("tab_close: in attach mode a session only closes tabs it opened itself")
+			}
 		}
 		s.mu.Lock()
 		if p := s.pages[id]; p != nil {
 			p.Close()
 			delete(s.pages, id)
 		}
-		if s.cur == id {
-			s.cur = ""
+		for _, o := range s.sessions {
+			if o.cur == id {
+				o.cur = ""
+			}
 		}
 		s.mu.Unlock()
+		s.unclaim(id)
 		if err := b.CloseTab(ctx, id); err != nil {
 			return nil, err
 		}
-		return s.tabs(ctx, b)
+		return s.tabs(ctx, b, sess)
 	}
 
-	p, err := s.current(ctx, b)
+	p, err := s.current(ctx, b, sess)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +345,7 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 	case "state_save", "state_load":
 		path := a.Path
 		if path == "" {
-			path = filepath.Join(Home(), "state.json")
+			path = filepath.Join(Home(), stateFile(sess))
 		}
 		if method == "state_save" {
 			n, err := p.SaveState(ctx, path)
@@ -326,10 +370,10 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 		if err != nil {
 			return nil, err
 		}
-		return s.reply(ctx, b, p, &page.Result{Note: fmt.Sprintf("%s %q handled (accept=%v)", d.Type, d.Message, *a.Accept)}, nil, a)
+		return s.reply(ctx, b, sess, p, &page.Result{Note: fmt.Sprintf("%s %q handled (accept=%v)", d.Type, d.Message, *a.Accept)}, nil, a)
 	}
 
-	before, _ := b.Pages(ctx)
+	before, _ := s.sessionPages(ctx, b, sess)
 	var r *page.Result
 	switch method {
 	case "navigate":
@@ -395,18 +439,18 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, method string
 	if err != nil {
 		return nil, err
 	}
-	return s.reply(ctx, b, p, r, before, a)
+	return s.reply(ctx, b, sess, p, r, before, a)
 }
 
 // reply adds tabs opened by the action and, if asked, a fresh snapshot.
-func (s *Server) reply(ctx context.Context, b *browser.Browser, p *page.Page, r *page.Result, before []*target.Info, a Params) (*ActionReply, error) {
+func (s *Server) reply(ctx context.Context, b *browser.Browser, sess *session, p *page.Page, r *page.Result, before []*target.Info, a Params) (*ActionReply, error) {
 	out := &ActionReply{Result: r}
 	if before != nil {
 		seen := map[target.ID]bool{}
 		for _, t := range before {
 			seen[t.TargetID] = true
 		}
-		if after, err := b.Pages(ctx); err == nil {
+		if after, err := s.sessionPages(ctx, b, sess); err == nil {
 			for _, t := range after {
 				if !seen[t.TargetID] {
 					out.NewTabs = append(out.NewTabs, TabInfo{TargetID: string(t.TargetID), URL: t.URL, Title: t.Title})
@@ -432,18 +476,24 @@ func orNull(v []byte) []byte {
 	return v
 }
 
-// agentEnv lets the Jev loop use (and follow) the daemon's tabs.
+// agentEnv lets the Jev loop use (and follow) the tabs of one session.
 type agentEnv struct {
-	s *Server
-	b *browser.Browser
+	s    *Server
+	b    *browser.Browser
+	sess *session
 }
 
-func (e agentEnv) Current(ctx context.Context) (*page.Page, error) { return e.s.current(ctx, e.b) }
-func (e agentEnv) Switch(ctx context.Context, id string) (*page.Page, error) {
-	return e.s.use(ctx, e.b, target.ID(id))
+func (e agentEnv) Current(ctx context.Context) (*page.Page, error) {
+	return e.s.current(ctx, e.b, e.sess)
 }
+func (e agentEnv) Switch(ctx context.Context, id string) (*page.Page, error) {
+	return e.s.use(ctx, e.b, e.sess, target.ID(id), true)
+}
+
+// TabIDs lists only this session's tabs, so a run never follows a tab that
+// another session opened.
 func (e agentEnv) TabIDs(ctx context.Context) ([]string, error) {
-	ps, err := e.b.Pages(ctx)
+	ps, err := e.s.sessionPages(ctx, e.b, e.sess)
 	ids := make([]string, 0, len(ps))
 	for _, p := range ps {
 		ids = append(ids, string(p.TargetID))
@@ -451,7 +501,7 @@ func (e agentEnv) TabIDs(ctx context.Context) ([]string, error) {
 	return ids, err
 }
 
-func (s *Server) run(ctx context.Context, b *browser.Browser, raw json.RawMessage) (any, error) {
+func (s *Server) run(ctx context.Context, b *browser.Browser, sess *session, raw json.RawMessage) (any, error) {
 	var t agent.Task
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, fmt.Errorf("run: bad params: %w", err)
@@ -473,7 +523,7 @@ func (s *Server) run(ctx context.Context, b *browser.Browser, raw json.RawMessag
 	}
 	j, l := s.jev, s.llm
 	s.mu.Unlock()
-	r := &agent.Runner{Jev: j, Env: agentEnv{s, b}}
+	r := &agent.Runner{Jev: j, Env: agentEnv{s, b, sess}}
 	if l != nil {
 		r.LLM = l
 	}

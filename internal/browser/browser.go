@@ -190,9 +190,27 @@ type PageInfo struct {
 
 // Open creates a background tab, navigates it and waits for load.
 func (b *Browser) Open(ctx context.Context, url string) (*PageInfo, error) {
-	no := false
+	return b.open(ctx, url, false)
+}
+
+// OpenWindow creates the tab in a window of its own. Chrome shows only one
+// tab per window in front, and a background tab gets no hit-testing or JS
+// dialogs, so concurrent sessions must each drive a tab that is the front
+// tab of its own window.
+func (b *Browser) OpenWindow(ctx context.Context, url string) (*PageInfo, error) {
+	return b.open(ctx, url, true)
+}
+
+func (b *Browser) open(ctx context.Context, url string, window bool) (*PageInfo, error) {
+	yes, no := true, false
+	params := target.CreateTargetParams{URL: "about:blank"}
+	if window {
+		params.NewWindow, params.Background = &yes, &yes
+	} else {
+		params.Focus = &no
+	}
 	b.tabMu.Lock()
-	created, err := cdproto.Call(ctx, b.conn.Browser(), target.CreateTarget, target.CreateTargetParams{URL: "about:blank", Focus: &no})
+	created, err := cdproto.Call(ctx, b.conn.Browser(), target.CreateTarget, params)
 	b.tabMu.Unlock()
 	if err != nil {
 		return nil, err

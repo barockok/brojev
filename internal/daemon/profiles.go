@@ -17,7 +17,8 @@ type ProfileParams struct {
 	Dir           string `json:"dir,omitempty"`
 	ChromeProfile string `json:"chromeProfile,omitempty"`
 	Attach        bool   `json:"attach,omitempty"`
-	Quit          bool   `json:"quit,omitempty"` // on use: also close the previous profile's Chrome
+	Quit          bool   `json:"quit,omitempty"`  // on use: also close the previous profile's Chrome
+	Force         bool   `json:"force,omitempty"` // on use: switch even while other sessions are using the browser
 }
 
 type ProfileInfo struct {
@@ -27,7 +28,8 @@ type ProfileInfo struct {
 	Exists    bool `json:"exists"`
 }
 
-func (s *Server) profileTool(ctx context.Context, raw json.RawMessage) (any, error) {
+func (s *Server) profileTool(ctx context.Context, req Request) (any, error) {
+	raw := req.Params
 	var a ProfileParams
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -95,6 +97,13 @@ func (s *Server) profileTool(ctx context.Context, raw json.RawMessage) (any, err
 		next, ok := cfg.Get(home, a.Name)
 		if !ok {
 			return nil, fmt.Errorf("no profile %q; add it first", a.Name)
+		}
+		if cur, err := ActiveProfile(); err == nil && cur != next && !a.Force {
+			// Switching drops the browser connection and every session's tabs.
+			if others := s.otherLiveBases(req.Session); len(others) > 0 {
+				return nil, fmt.Errorf("profile use: %d other brojev session(s) are using the browser and would lose their tabs; "+
+					"ask them to finish, or pass force=true to switch anyway", len(others))
+			}
 		}
 		cfg.Active = a.Name
 		if err := cfg.Save(home); err != nil {

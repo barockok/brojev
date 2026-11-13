@@ -57,8 +57,9 @@ func LogPath() string                         { return filepath.Join(Home(), "br
 func chromeLog() string                       { return filepath.Join(Home(), "chrome.log") }
 
 type Request struct {
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params,omitempty"`
+	Method  string          `json:"method"`
+	Session string          `json:"session,omitempty"` // the calling brojev-mcp process; empty is the default session
+	Params  json.RawMessage `json:"params,omitempty"`
 }
 
 type Response struct {
@@ -72,8 +73,12 @@ type Server struct {
 	mu       sync.Mutex
 	browser  *browser.Browser
 	prof     profile.Profile // profile of the live connection
+	connMu   sync.Mutex      // serialises (re)connecting, which can take minutes in attach mode
 	pages    map[target.ID]*page.Page
-	cur      target.ID
+	sessions map[string]*session
+	owner    map[target.ID]string // tab -> owning named session
+	leases   map[string]int       // session base -> open lease connections
+	pending  map[string]*time.Timer
 	jev      *jev.Client
 	llm      *llm.Client
 	started  time.Time
@@ -129,6 +134,12 @@ func (s *Server) Serve(ctx context.Context) error {
 
 func (s *Server) handle(ctx context.Context, c net.Conn) {
 	defer c.Close()
+	var leased []string
+	defer func() {
+		for _, base := range leased {
+			s.leaseDrop(base)
+		}
+	}()
 	sc := bufio.NewScanner(c)
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
 	enc := json.NewEncoder(c)
@@ -137,6 +148,15 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		var resp Response
 		if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
 			resp.Error = "bad request: " + err.Error()
+		} else if req.Method == "hello" {
+			// A brojev-mcp process keeps this connection open for as long as it lives.
+			if req.Session == "" {
+				resp.Error = "hello: session required"
+			} else {
+				s.leaseAdd(req.Session)
+				leased = append(leased, req.Session)
+				resp.Result = json.RawMessage(`{"ok":true}`)
+			}
 		} else if out, err := s.dispatch(ctx, req); err != nil {
 			resp.Error = err.Error()
 		} else if out != nil {
@@ -159,29 +179,49 @@ func CDPURL() string { return os.Getenv("BROJEV_CDP_URL") }
 
 var errExternalChrome = errors.New("BROJEV_CDP_URL is set: brojev does not manage this Chrome")
 
-// conn returns the live browser, (re)connecting and launching Chrome if needed.
-func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
+// keepTabs reports whether the Chrome is not ours to tidy: the user's real
+// Chrome (attach mode) or an external one. Sessions never close tabs there
+// on exit, and only close tabs they opened.
+func (s *Server) keepTabs() bool {
+	if CDPURL() != "" {
+		return true
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.prof.Attach
+}
+
+// conn returns the live browser, (re)connecting and launching Chrome if needed.
+func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
 	if base := CDPURL(); base != "" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		return s.connExternalLocked(ctx, base)
 	}
 	prof, err := ActiveProfile()
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
 	if s.browser != nil {
 		select {
 		case <-s.browser.Done():
 			s.dropLocked() // Chrome quit or the socket dropped
 		default:
 			if prof == s.prof {
-				return s.browser, nil
+				b := s.browser
+				s.mu.Unlock()
+				return b, nil
 			}
 			log.Printf("profile changed %s -> %s; reconnecting", s.prof.Name, prof.Name)
 			s.dropLocked()
 		}
 	}
+	s.mu.Unlock()
+	// Launching can wait minutes (attach mode waits for the user's Allow
+	// click): do it without s.mu so other sessions' bookkeeping is not blocked.
 	attach := prof.Attach
 	ep, launched, err := chrome.Ensure(ctx, chrome.Options{Profile: prof.Dir, ProfileDirectory: prof.ChromeProfile, Headless: s.Headless, Log: chromeLog(), Attach: attach})
 	if err != nil {
@@ -198,12 +238,14 @@ func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 		return nil, err
 	}
 	log.Printf("connected to %s (profile=%s launched=%v)", ep, prof.Name, launched)
-	s.prof = prof
 	if err := b.EnableDownloads(ctx, filepath.Join(Home(), "downloads")); err != nil {
 		log.Printf("downloads: %v", err)
 	}
-	s.pages, s.cur = map[target.ID]*page.Page{}, ""
+	s.mu.Lock()
+	s.prof = prof
+	s.pages = map[target.ID]*page.Page{}
 	s.browser = b
+	s.mu.Unlock()
 	return b, nil
 }
 
@@ -236,7 +278,7 @@ func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.
 	} else {
 		log.Printf("downloads: set the external Chrome's download dir to %s", dl)
 	}
-	s.pages, s.cur = map[target.ID]*page.Page{}, ""
+	s.pages = map[target.ID]*page.Page{}
 	s.browser = b
 	s.ensureGuardLocked(ctx, b)
 	return b, nil
@@ -254,17 +296,24 @@ func (s *Server) ensureGuardLocked(ctx context.Context, b *browser.Browser) {
 		p.Close()
 		delete(s.pages, g)
 	}
-	if s.cur == g {
-		s.cur = ""
+	for _, sess := range s.sessions {
+		if sess.cur == g {
+			sess.cur = ""
+		}
 	}
 }
 
-// dropLocked forgets the live connection (Chrome itself keeps running).
+// dropLocked forgets the live connection (Chrome itself keeps running) and
+// every session's tabs, which died with it.
 func (s *Server) dropLocked() {
 	for _, p := range s.pages {
 		p.Close()
 	}
-	s.pages, s.cur = map[target.ID]*page.Page{}, ""
+	s.pages = map[target.ID]*page.Page{}
+	s.owner = map[target.ID]string{}
+	for _, sess := range s.sessions {
+		sess.cur, sess.owned = "", map[target.ID]bool{}
+	}
 	if s.browser != nil {
 		s.browser.Close()
 		s.browser = nil
@@ -277,7 +326,7 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 	case "ping":
 		return map[string]any{"pid": os.Getpid(), "uptimeSec": int(time.Since(s.started).Seconds()), "version": version.Version}, nil
 	case "profile":
-		return s.profileTool(ctx, req.Params)
+		return s.profileTool(ctx, req)
 	case "keys":
 		return setKeys(req.Params)
 	case "shutdown":
@@ -289,11 +338,21 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if req.Method == "run" {
-		return s.run(ctx, b, req.Params)
-	}
-	if pageTools[req.Method] {
-		return s.pageTool(ctx, b, req.Method, req.Params)
+	if req.Method == "run" || pageTools[req.Method] {
+		id, base := resolveSession(req.Session, req.Params)
+		sess, err := s.sessionFor(id, base)
+		if err != nil {
+			return nil, err
+		}
+		done, err := sess.acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer done()
+		if req.Method == "run" {
+			return s.run(ctx, b, sess, req.Params)
+		}
+		return s.pageTool(ctx, b, sess, req.Method, req.Params)
 	}
 	switch req.Method {
 	case "status":
@@ -308,7 +367,7 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		out := map[string]any{
 			"product": v.Product, "protocol": v.ProtocolVersion, "endpoint": b.Endpoint,
 			"profile": s.prof.Name, "profileDir": s.prof.Dir, "chromeProfile": s.prof.ChromeProfile, "attach": s.prof.Attach,
-			"tabs": len(pages), "pid": os.Getpid(),
+			"tabs": len(pages), "pid": os.Getpid(), "sessions": s.sessionCount(),
 		}
 		if g := b.Guard(); g != "" {
 			out["guardTab"] = g
@@ -334,8 +393,14 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 	return nil, fmt.Errorf("unknown method %q", req.Method)
 }
 
-// Call sends one request to the running daemon.
+// Call sends one request to the running daemon as the default session, or as
+// $BROJEV_SESSION when the CLI user set one.
 func Call(ctx context.Context, method string, params, out any) error {
+	return CallAs(ctx, os.Getenv("BROJEV_SESSION"), method, params, out)
+}
+
+// CallAs sends one request on behalf of a session.
+func CallAs(ctx context.Context, session, method string, params, out any) error {
 	var d net.Dialer
 	c, err := d.DialContext(ctx, "unix", SocketPath())
 	if err != nil {
@@ -345,7 +410,7 @@ func Call(ctx context.Context, method string, params, out any) error {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
-	req := Request{Method: method}
+	req := Request{Method: method, Session: session}
 	if params != nil {
 		if req.Params, err = json.Marshal(params); err != nil {
 			return err
@@ -396,7 +461,10 @@ func Ensure(ctx context.Context, extraArgs ...string) error {
 		return nil
 	}
 	if Call(ctx, "ping", nil, &ping) == nil {
-		if ping.Version == version.Version {
+		if ping.Version == version.Version || !versionOlder(ping.Version, version.Version) {
+			// Same version, or a newer daemon started by another brojev-mcp:
+			// keep it, or two plugin versions would restart each other's
+			// daemon forever and wipe every session's state.
 			return nil
 		}
 		// An upgraded binary: replace the old daemon (Chrome keeps running).

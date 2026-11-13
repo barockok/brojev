@@ -30,7 +30,7 @@ func TestCDPURLGuard(t *testing.T) {
 
 	for _, quit := range []bool{false, true} {
 		raw, _ := json.Marshal(ProfileParams{Action: "use", Name: "default", Quit: quit})
-		if _, err := s.profileTool(ctx, raw); err == nil || err.Error() != errExternalChrome.Error() {
+		if _, err := s.profileTool(ctx, Request{Method: "profile", Params: raw}); err == nil || err.Error() != errExternalChrome.Error() {
 			t.Fatalf("profile use (quit=%v): err = %v, want %q", quit, err, errExternalChrome)
 		}
 	}
