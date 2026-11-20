@@ -41,6 +41,8 @@ type Page struct {
 	dialog    *Dialog
 	kb        *keyboard.Keyboard
 	dialogs   chan struct{} // receives when a dialog opens
+	tsMu      sync.Mutex
+	tsTries   map[string]tsAttempt
 	cancels   []func()
 	ctx       context.Context
 	stop      context.CancelFunc

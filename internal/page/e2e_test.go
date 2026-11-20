@@ -87,6 +87,64 @@ knob.onpointerup = e => { if (down !== null) out.textContent = 'knob moved ' + M
 
 	"/nav":  `<title>nav one</title><a href="/nav2">Next page</a>`,
 	"/nav2": `<title>nav two</title><p>arrived</p>`,
+
+	// Cloudflare's published test sitekeys: 1x always passes, 2x always
+	// blocks, 3x forces an interactive challenge. The fixtures need network
+	// access to challenges.cloudflare.com.
+	"/turnstile-pass": `<title>turnstile pass</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div><p id=out></p>`,
+	"/turnstile-block": `<title>turnstile block</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="2x00000000000000000000AB"></div><p id=out></p>`,
+	"/turnstile-force": `<title>turnstile force</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="3x00000000000000000000FF"></div><p id=out></p>`,
+
+	// A local widget with the same shape as Turnstile: a root, a cross-site
+	// iframe with a checkbox, and a response input the parent fills when the
+	// checkbox reports success. Exercises the in-page click path without
+	// Cloudflare.
+	"/turnstile-fake": `<title>turnstile fake</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FA"><iframe id=w style="width:300px;height:65px;border:1px solid"></iframe></div><p id=out></p>
+<script>
+w.src = location.href.replace('127.0.0.1', 'localhost').replace('/turnstile-fake', '/fake-turnstile');
+addEventListener('message', (e) => {
+  let i = document.querySelector('[name="cf-turnstile-response"]');
+  if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'cf-turnstile-response'; document.querySelector('.cf-turnstile').appendChild(i); }
+  i.value = e.data;
+  out.textContent = 'solved';
+});
+</script>`,
+	"/fake-turnstile": `<title>fake widget</title><label><input type=checkbox id=cb> Verify you are human</label>
+<script>cb.addEventListener('click', () => parent.postMessage('local-token', '*'));</script>`,
+
+	// Explicit-render shapes can draw the widget in a closed shadow root with
+	// no iframe of its own; a visible root is the only signal. The click
+	// handler stands in for Cloudflare's visual widget.
+	"/turnstile-noframe": `<title>turnstile noframe</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FB"><div id=cb role=checkbox style="width:300px;height:65px;border:1px solid">Verify you are human</div></div><p id=out></p>
+<script>cb.addEventListener('click', () => {
+  let i = document.querySelector('[name="cf-turnstile-response"]');
+  if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'cf-turnstile-response'; document.querySelector('.cf-turnstile').appendChild(i); }
+  i.value = 'noframe-token';
+  out.textContent = 'solved';
+});</script>`,
+
+	// A wide root whose checkbox sits to the right: the deterministic
+	// left-center click misses, the visual box hits.
+	"/turnstile-visual": `<title>turnstile visual</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FC" style="position:relative;width:600px;height:65px">
+<label style="position:absolute;left:400px;top:12px;display:flex;align-items:center;gap:8px">
+<input type=checkbox id=cb style="width:24px;height:24px"><span>Verify you are human</span>
+</label>
+</div><p id=out></p>
+<script>cb.addEventListener('click', () => {
+  let i = document.querySelector('[name="cf-turnstile-response"]');
+  if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'cf-turnstile-response'; document.querySelector('.cf-turnstile').appendChild(i); }
+  i.value = 'visual-token';
+  out.textContent = 'solved';
+});</script>`,
 }
 
 type env struct {

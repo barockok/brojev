@@ -83,11 +83,30 @@ brojev runs locally. What leaves your machine:
 |---|---|---|
 | Jev, through OpenRouter (`openrouter.ai`) to TypeSafe, or `api.typesafe.ai` directly with a TypeSafe key | the goal, the `values` you pass, the page URL, title and snapshot (element roles, names, field values, visible text; password values are masked) | each `run` step |
 | Helper model on OpenRouter | the goal, the target field and the snapshot | only when `run` must write field text you did not provide, or with `answer` |
+| Jev with an image (`TURNSTILE_VISUAL=jev`) | a clipped PNG around the Turnstile widget | only when the in-page click fails and the visual phase is enabled |
+| CapSolver (`api.capsolver.com`) | page URL, Turnstile sitekey, `data-action`, `data-cdata` | only when an in-page Turnstile attempt fails and `CAPSOLVER_API_KEY` is set |
 | Claude | tool results (snapshots, screenshots, eval output) | every MCP call, as part of your Claude Code conversation |
 
-The primitives (`snapshot`, `click`, ...) call no third-party service. With a personal Chrome profile (attach mode) the snapshot can contain whatever that page shows, including logged-in content: use a dedicated profile for anything you would not paste into a chat.
+The primitives (`snapshot`, `click`, ...) call no third-party service unless the Turnstile resolver runs its visual or CapSolver fallback. With a personal Chrome profile (attach mode) the snapshot can contain whatever that page shows, including logged-in content: use a dedicated profile for anything you would not paste into a chat.
 
 Local state lives in `~/.brojev` (profiles, downloads, saved cookie/storage state, keys in `env`, daemon log). The daemon listens only on a unix socket readable by your user; launched Chrome exposes its debug port on 127.0.0.1, so other local programs running as you could connect to it while it is open.
+
+## Cloudflare Turnstile
+
+brojev detects Turnstile widgets and resolves them itself, on every page call: after navigation and each action, before snapshots, and inside every `run` step. The calling agent does not get a captcha step.
+
+1. In-page attempt: brojev clicks the widget's checkbox inside its iframe, or the widget's left-center when it draws in a closed shadow root without a frame, and waits up to 8 seconds for the `cf-turnstile-response` token. Widgets that pass without interaction are picked up by the same poll.
+2. Visual click (opt-in): when `TURNSTILE_VISUAL=jev` is set and the in-page attempt fails, brojev captures a clipped PNG around the widget, asks Jev for the checkbox box, `noul` presence and widget state, then clicks the returned box. Cost is about $0.00005 to $0.00025 per attempt and latency is a few hundred milliseconds. This is useful when a theme, language or layout moves the checkbox away from the blind left-center point. It needs a Jev key.
+3. CapSolver fallback: if the earlier steps fail and `CAPSOLVER_API_KEY` is set, brojev sends the page URL, sitekey, `data-action` and `data-cdata` to CapSolver (`AntiTurnstileTaskProxyLess`), then injects the returned token into the response input. CapSolver lists Turnstile at $1.20 per 1,000 solves, so about $0.0012 per task. Without a key, brojev stays in-page and visual only.
+
+The whole attempt is bounded by `TURNSTILE_TIMEOUT_MS` (default 60000), with at most two attempts per widget on a page. When a widget is present, replies and snapshots carry one line:
+
+```
+TURNSTILE: solved
+TURNSTILE: unresolved (in-page attempt failed; CapSolver not configured)
+```
+
+Limits: full-page Cloudflare interstitials are detected and reported, not solved. Token injection covers standard form posts; callback-only widgets that never read the response input may stay unresolved. The visual phase was validated against Cloudflare's `3x` key and local widgets through TypeSafe; image routing through OpenRouter is untested. Set `CAPSOLVER_API_KEY` in `~/.brojev/env` or the plugin settings, and `TURNSTILE_VISUAL=jev` in `~/.brojev/env` or the environment, to enable the fallbacks for every session; `brojev doctor` shows what is configured.
 
 ## How it works
 
@@ -122,7 +141,7 @@ brojev profile add me --dir "~/Library/Application Support/Google/Chrome" --chro
 brojev profile use work [--quit]                 # switch; --quit closes the previous profile's Chrome
 ```
 
-Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; profile switching is refused; the daemon keeps one idle `about:blank#brojev-guard` tab open, hidden from `tabs`, so the window never closes), `BROJEV_NO_SPAWN=1` (clients never start or replace the daemon and `brojev stop` is refused; they fail if it is not running or runs another version. The daemon itself still accepts `shutdown` from any socket client), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
+Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; profile switching is refused; the daemon keeps one idle `about:blank#brojev-guard` tab open, hidden from `tabs`, so the window never closes), `BROJEV_NO_SPAWN=1` (clients never start or replace the daemon and `brojev stop` is refused; they fail if it is not running or runs another version. The daemon itself still accepts `shutdown` from any socket client), `CAPSOLVER_API_KEY` (optional Turnstile fallback), `TURNSTILE_VISUAL` (`jev` adds the image click before CapSolver), `TURNSTILE_TIMEOUT_MS` (default 60000), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
 ## Shared host daemon
 
@@ -159,7 +178,7 @@ python3 eval/claude_bench.py --config brojev=a.json --config playwright=b.json  
 - Supported on macOS and Linux (arm64, amd64). Windows is not supported yet.
 - Closed shadow roots, canvas apps and OS-level UI need the coordinate and screenshot tools.
 - Jev is weak at numbers and comparisons ("cheapest", counting, date arithmetic): Claude should do those from snapshots and pass exact values.
-- Captchas are handed to the human. brojev does not try to bypass bot protection.
+- **Cloudflare Turnstile** is detected and resolved automatically (in-page click, then CapSolver when a key is set). Full-page interstitials and other captcha types still go to the user; brojev does not patch fingerprints or spoof browser signals.
 
 ## Credits
 

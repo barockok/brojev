@@ -1,9 +1,94 @@
 package jev
 
 import (
+	"context"
+	"encoding/json"
+	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestAskQuestionsWithImage(t *testing.T) {
+	var got map[string]any
+	var header string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Get("TypeSafe-Danger-Zone-Images")
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"model":"fake","answers":{
+			"checkbox":{"type":"box","confidence":0.82,"box":{"top":0.43,"bottom":0.56,"left":0.12,"right":0.19}},
+			"present":{"type":"noul","noul":0.99},
+			"state":{"type":"choice","choice":"checkbox","probabilities":{"checkbox":1},"confidence":1}
+		},"usage":{"input_tokens":1250}}`))
+	}))
+	defer srv.Close()
+	c := &Client{Key: "k", Model: "jev-latest", Endpoint: srv.URL, HTTP: srv.Client()}
+	resp, err := c.AskQuestions(context.Background(),
+		map[string]any{"shot": "shot"},
+		map[string]Asset{"shot": {Type: "image", Format: "png", DataBase64: "abc"}},
+		map[string]Question{
+			"checkbox": {Type: "box", Instructions: "find the checkbox"},
+			"present":  {Type: "noul", Instructions: "is it visible?"},
+			"state":    {Type: "choice", Instructions: "widget state", Criteria: map[string]any{"checkbox": "empty checkbox"}},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header != "true" {
+		t.Fatalf("image header = %q", header)
+	}
+	assets := got["assets"].(map[string]any)
+	shot := assets["shot"].(map[string]any)
+	if shot["type"] != "image" || shot["format"] != "png" || shot["data_base64"] != "abc" {
+		t.Fatalf("asset = %#v", shot)
+	}
+	qs := got["questions"].(map[string]any)
+	for id, typ := range map[string]string{"checkbox": "box", "present": "noul", "state": "choice"} {
+		if qs[id].(map[string]any)["type"] != typ {
+			t.Fatalf("%s question = %#v", id, qs[id])
+		}
+	}
+	box := resp.Answers["checkbox"]
+	if box.Box == nil || math.Abs(box.Box.Left-0.12) > 1e-9 || math.Abs(box.Confidence-0.82) > 1e-9 {
+		t.Fatalf("box answer = %+v", box)
+	}
+	if resp.Answers["present"].Noul != 0.99 || resp.Answers["state"].Choice != "checkbox" {
+		t.Fatalf("answers = %+v", resp.Answers)
+	}
+	if math.Abs(Cost(resp.Usage)-0.0000525) > 1e-9 {
+		t.Fatalf("cost = %v", Cost(resp.Usage))
+	}
+}
+
+func TestAskStillSendsChoices(t *testing.T) {
+	var got map[string]any
+	var header string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Get("TypeSafe-Danger-Zone-Images")
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"answers":{"op":{"type":"choice","choice":"A","probabilities":{"A":1},"confidence":1}}}`))
+	}))
+	defer srv.Close()
+	c := &Client{Key: "k", Model: "jev-latest", Endpoint: srv.URL, HTTP: srv.Client()}
+	if _, err := c.Ask(context.Background(), map[string]any{"page": "x"}, map[string]Choice{
+		"op": {Instructions: "pick", Criteria: map[string]any{"A": "a", "B": "b"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if header != "" {
+		t.Fatalf("unexpected image header %q", header)
+	}
+	op := got["questions"].(map[string]any)["op"].(map[string]any)
+	if op["type"] != "choice" || op["criteria"].(map[string]any)["A"] != "a" {
+		t.Fatalf("question = %#v", op)
+	}
+	if _, ok := got["assets"]; ok {
+		t.Fatalf("assets present: %#v", got["assets"])
+	}
+}
 
 func TestKeyFromEnv(t *testing.T) {
 	both := map[string]string{"OPENROUTER_API_KEY": "or", "TYPESAFE_API_KEY": "ts"}

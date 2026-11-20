@@ -555,6 +555,8 @@ func rpcPrint(method string, params any) error {
 func doctor() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	daemon.CleanKeyEnv()
+	daemon.LoadEnvFile()
 	failed := false
 	check := func(name string, err error, detail string) bool {
 		if err != nil {
@@ -631,6 +633,20 @@ func doctor() error {
 	} else {
 		_, endpoint, name := jev.KeyFromEnv()
 		fmt.Printf("  [ok  ] %-18s %s set, provider %s (%s)\n", "jev api key", name, jev.Provider(), endpoint)
+	}
+	if key := os.Getenv("CAPSOLVER_API_KEY"); key != "" && !strings.HasPrefix(key, "${") {
+		fmt.Printf("  [ok  ] %-18s configured (Turnstile fallback, about $0.0012 per solve)\n", "capsolver")
+	} else {
+		fmt.Printf("  [ok  ] %-18s not configured (in-page only)\n", "capsolver")
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TURNSTILE_VISUAL")), "jev") {
+		if key, _, _ := jev.KeyFromEnv(); key != "" {
+			fmt.Printf("  [ok  ] %-18s jev (image click before CapSolver)\n", "turnstile visual")
+		} else {
+			fmt.Printf("  [warn] %-18s jev requested but no Jev key; visual phase skipped\n", "turnstile visual")
+		}
+	} else {
+		fmt.Printf("  [ok  ] %-18s off (TURNSTILE_VISUAL=jev enables an image click)\n", "turnstile visual")
 	}
 	if failed {
 		return fmt.Errorf("some checks failed; logs in %s", daemon.Home())

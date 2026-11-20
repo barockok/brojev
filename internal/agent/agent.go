@@ -15,6 +15,7 @@ import (
 	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/llm"
 	"github.com/barockok/brojev/internal/page"
+	"github.com/barockok/brojev/internal/turnstile"
 )
 
 type Task struct {
@@ -52,22 +53,25 @@ type Outcome struct {
 	// Status: done, blocked (Jev chose BLOCKED or progress stalled),
 	// needs_claude (low confidence / missing value / repeated failures),
 	// budget (step limit), error.
-	Status   string  `json:"status"`
-	Reason   string  `json:"reason,omitempty"`
-	Answer   string  `json:"answer,omitempty"`
-	Verified *bool   `json:"verified,omitempty"`
-	URL      string  `json:"url"`
-	Title    string  `json:"title"`
-	Snapshot string  `json:"snapshot,omitempty"`
-	Steps    []Step  `json:"steps"`
-	TotalMS  int64   `json:"totalMs"`
-	JevMS    int64   `json:"jevMs"`
-	ActMS    int64   `json:"actMs"`
-	HelperMS int64   `json:"helperMs"`
-	NavMS    int64   `json:"navMs"`
-	JevCalls int     `json:"jevCalls"`
-	Tokens   int     `json:"inputTokens"`
-	CostUSD  float64 `json:"costUsd"`
+	Status   string `json:"status"`
+	Reason   string `json:"reason,omitempty"`
+	Answer   string `json:"answer,omitempty"`
+	Verified *bool  `json:"verified,omitempty"`
+	// Turnstile is the last widget state seen by the loop. A solved widget is
+	// resolved inside brojev; an unresolved one is reported, not retried.
+	Turnstile *turnstile.Status `json:"turnstile,omitempty"`
+	URL       string            `json:"url"`
+	Title     string            `json:"title"`
+	Snapshot  string            `json:"snapshot,omitempty"`
+	Steps     []Step            `json:"steps"`
+	TotalMS   int64             `json:"totalMs"`
+	JevMS     int64             `json:"jevMs"`
+	ActMS     int64             `json:"actMs"`
+	HelperMS  int64             `json:"helperMs"`
+	NavMS     int64             `json:"navMs"`
+	JevCalls  int               `json:"jevCalls"`
+	Tokens    int               `json:"inputTokens"`
+	CostUSD   float64           `json:"costUsd"`
 }
 
 // Env gives the loop the current tab and lets it follow new tabs.
@@ -109,6 +113,7 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		out.Status, out.Reason = status, reason
 		if p != nil {
 			if s, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 3000}); err == nil {
+				s.Turnstile = out.Turnstile
 				out.URL, out.Title, out.Snapshot = s.URL, s.Title, s.String()
 			}
 		}
@@ -137,9 +142,20 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		if err := ctx.Err(); err != nil {
 			return finish(p, "error", err.Error())
 		}
+		ts := p.EnsureTurnstile(ctx)
 		snap, err := p.Snapshot(ctx, page.SnapshotOptions{MaxText: 6000, MaxOffscreen: maxOffscreen})
 		if err != nil {
 			return finish(p, "error", "snapshot: "+err.Error())
+		}
+		snap.Turnstile = ts
+		if ts != nil && ts.Detected {
+			out.Turnstile = ts
+			if ts.State == turnstile.StateInterstitial {
+				return finish(p, "blocked", "turnstile unsolved: full-page Cloudflare challenge")
+			}
+			if ts.State == turnstile.StateUnresolved && len(snap.Elements) == 0 && strings.TrimSpace(snap.Text) == "" {
+				return finish(p, "blocked", "turnstile unsolved: "+ts.Reason)
+			}
 		}
 		fp := fingerprint(snap)
 		if n := len(history); n > 0 && history[n-1].Error == "" {

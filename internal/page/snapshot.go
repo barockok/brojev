@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	cdproto "github.com/chromedp/cdproto/cdp"
+
+	"github.com/barockok/brojev/internal/turnstile"
 )
 
 // Element is one actionable element. Rect is in top-level viewport CSS px.
@@ -37,6 +39,9 @@ type Snapshot struct {
 	Text     string     `json:"text"`
 	Frames   []string   `json:"frames,omitempty"` // "f1 https://..." for non-main frames
 	Dialog   *Dialog    `json:"dialog,omitempty"`
+	// Turnstile is set by the caller after detection; snapshots do not run
+	// detection themselves, so reading never triggers a solve.
+	Turnstile *turnstile.Status `json:"turnstile,omitempty"`
 }
 
 type rawSnap struct {
@@ -190,6 +195,9 @@ func (s *Snapshot) String() string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "url: %s\ntitle: %s\n", s.URL, s.Title)
+	if l := s.Turnstile.Line(); l != "" {
+		b.WriteString(l + "\n")
+	}
 	fmt.Fprintf(&b, "viewport %gx%g, scroll %g/%g of %g\n", s.Viewport[0], s.Viewport[1], s.Scroll[1], s.Scroll[3]-s.Viewport[1], s.Scroll[3])
 	for _, f := range s.Frames {
 		fmt.Fprintf(&b, "frame %s\n", f)

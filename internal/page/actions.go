@@ -768,6 +768,37 @@ func (p *Page) Screenshot(ctx context.Context, full bool) ([]byte, error) {
 	return res.Data, nil
 }
 
+// Clip is a screenshot region in top-level viewport CSS px.
+type Clip struct {
+	X, Y, W, H, Scale float64
+}
+
+// ScreenshotClip captures a PNG of a clipped region. It is used for visual
+// localization (the Turnstile opt-in phase) rather than page screenshots.
+func (p *Page) ScreenshotClip(ctx context.Context, c Clip) ([]byte, error) {
+	if p.OpenDialog() != nil {
+		return nil, ErrDialogOpen
+	}
+	if c.W <= 0 || c.H <= 0 {
+		return nil, errors.New("screenshot clip: empty region")
+	}
+	if c.Scale <= 0 {
+		c.Scale = 1
+	}
+	yes := true
+	res, err := cdproto.Call(ctx, p.S, cdppage.CaptureScreenshot, cdppage.CaptureScreenshotParams{
+		Format: cdppage.CaptureScreenshotFormatPng,
+		Clip: &cdppage.Viewport{
+			X: c.X, Y: c.Y, Width: c.W, Height: c.H, Scale: c.Scale,
+		},
+		FromSurface: &yes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.Data, nil
+}
+
 // Eval runs JavaScript in the page's main world (page globals visible).
 func (p *Page) Eval(ctx context.Context, js string) (jsonv2.Value, error) {
 	if p.OpenDialog() != nil {
