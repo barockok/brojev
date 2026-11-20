@@ -2,7 +2,9 @@ package page
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	cdproto "github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/cdp/jsonv2"
 
+	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/turnstile"
 )
 
@@ -253,9 +256,96 @@ type tsAttempt struct {
 }
 
 type turnstileOptions struct {
-	Total  time.Duration
-	InPage time.Duration
-	Solver turnstile.Solver
+	Total        time.Duration
+	InPage       time.Duration
+	VisualBudget time.Duration
+	Solver       turnstile.Solver
+	Visual       turnstileVisual
+	VisualNote   string
+}
+
+// turnstileVisual is the opt-in Jev image locator. It returns normalized
+// image coordinates so the caller can translate them with the clip.
+type turnstileVisual interface {
+	Locate(ctx context.Context, png []byte) (*turnstileVisualResult, error)
+}
+
+type turnstileVisualResult struct {
+	Checkbox      *tsRect
+	Widget        *tsRect
+	Present       bool
+	BoxConfidence float64
+	State         string
+	CostUSD       float64
+	MS            int64
+}
+
+type jevVisual struct{ c *jev.Client }
+
+func (v *jevVisual) Locate(ctx context.Context, png []byte) (*turnstileVisualResult, error) {
+	const ref = "shot"
+	assets := map[string]jev.Asset{
+		ref: {Type: "image", Format: "png", DataBase64: base64.StdEncoding.EncodeToString(png)},
+	}
+	qs := map[string]jev.Question{
+		"checkbox": {
+			Type:         "box",
+			Instructions: `the small square checkbox immediately to the left of the words "Verify you are human" in shot`,
+		},
+		"widget": {
+			Type:         "box",
+			Instructions: `the entire Cloudflare verification widget, including its checkbox, text and logo, in shot`,
+		},
+		"checkbox_present": {
+			Type:         "noul",
+			Instructions: `Is an empty square checkbox next to the words "Verify you are human" visible in shot?`,
+		},
+		"state": {
+			Type:         "choice",
+			Instructions: "What is the Cloudflare verification widget in shot showing?",
+			Criteria: map[string]any{
+				"checkbox":        "An empty square checkbox next to the text Verify you are human, waiting for a click.",
+				"spinner":         "A spinner or loading indicator, the widget is checking.",
+				"verified":        "A green checkmark, or text saying Success or Verified.",
+				"image_challenge": "A grid of images, or a request to select images.",
+				"other":           "Anything else, including an error or a widget that failed to load.",
+			},
+		},
+	}
+	resp, err := v.c.AskQuestions(ctx, map[string]any{"shot": ref}, assets, qs)
+	if err != nil {
+		return nil, err
+	}
+	out := &turnstileVisualResult{MS: resp.Latency.Milliseconds(), CostUSD: jev.Cost(resp.Usage)}
+	if a, ok := resp.Answers["checkbox"]; ok {
+		out.BoxConfidence = a.Confidence
+		if a.Box != nil {
+			out.Checkbox = &tsRect{X: a.Box.Left, Y: a.Box.Top, W: a.Box.Right - a.Box.Left, H: a.Box.Bottom - a.Box.Top}
+		}
+	}
+	if a, ok := resp.Answers["widget"]; ok && a.Box != nil {
+		out.Widget = &tsRect{X: a.Box.Left, Y: a.Box.Top, W: a.Box.Right - a.Box.Left, H: a.Box.Bottom - a.Box.Top}
+	}
+	if a, ok := resp.Answers["checkbox_present"]; ok {
+		out.Present = a.Noul >= 0.5
+	}
+	if a, ok := resp.Answers["state"]; ok {
+		out.State = a.Choice
+	}
+	return out, nil
+}
+
+// turnstileVisualFromEnv builds the opt-in visual locator. The second return
+// value explains why it is missing when TURNSTILE_VISUAL=jev was requested.
+func turnstileVisualFromEnv() (turnstileVisual, string) {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("TURNSTILE_VISUAL")), "jev") {
+		return nil, ""
+	}
+	c, err := jev.FromEnv()
+	if err != nil {
+		return nil, "TURNSTILE_VISUAL=jev but " + err.Error()
+	}
+	return &jevVisual{c: c}, ""
 }
 
 func turnstileTimeout() time.Duration {
@@ -274,8 +364,10 @@ func turnstileTimeout() time.Duration {
 // It is safe to call after every action: an absent widget costs one eval.
 // It never returns a hard error; failures are in Status.Reason.
 func (p *Page) EnsureTurnstile(ctx context.Context) *turnstile.Status {
+	vis, visNote := turnstileVisualFromEnv()
 	return p.ensureTurnstile(ctx, turnstileOptions{
-		Total: turnstileTimeout(), InPage: 8 * time.Second, Solver: turnstile.FromEnv(),
+		Total: turnstileTimeout(), InPage: 8 * time.Second, VisualBudget: 8 * time.Second,
+		Solver: turnstile.FromEnv(), Visual: vis, VisualNote: visNote,
 	})
 }
 
@@ -352,9 +444,45 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 		return final
 	}
 
+	visualReason := ""
+	if o.Visual != nil {
+		vb := o.VisualBudget
+		if vb <= 0 {
+			vb = 8 * time.Second
+		}
+		if vb > total {
+			vb = total
+		}
+		ok, reason, used, cost, ms := p.tryTurnstileVisual(ctx, o.Visual, vb)
+		st.VisualUsed = used
+		st.VisualMS = ms
+		st.CostUSD += cost
+		if ok {
+			delete(p.tsTries, key)
+			fresh, _, _, derr := p.detectTurnstile(ctx)
+			if derr != nil {
+				return &turnstile.Status{
+					Detected: true, Sitekey: w.Sitekey, Action: w.Action, CData: w.CData,
+					Mode: w.Mode, State: turnstile.StateSolved, Attempts: a.cycles,
+					VisualUsed: true, VisualMS: ms, CostUSD: st.CostUSD,
+				}
+			}
+			final := statusOf(fresh, nil)
+			final.Attempts, final.VisualUsed, final.VisualMS, final.CostUSD = a.cycles, true, ms, st.CostUSD
+			return final
+		}
+		visualReason = reason
+	} else if o.VisualNote != "" {
+		visualReason = o.VisualNote
+	}
+
 	if o.Solver == nil {
 		st.State = turnstile.StateUnresolved
-		st.Reason = "in-page attempt failed; CapSolver not configured"
+		if visualReason != "" {
+			st.Reason = "in-page failed; " + visualReason + "; CapSolver not configured"
+		} else {
+			st.Reason = "in-page attempt failed; CapSolver not configured"
+		}
 		return st
 	}
 	if w.Sitekey == "" {
@@ -363,11 +491,14 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 		return st
 	}
 	st.SolverUsed = true
-	st.CostUSD = turnstile.CostPerSolveUSD
+	st.CostUSD += turnstile.CostPerSolveUSD
 	token, err := o.Solver.Solve(ctx, turnstile.Target{URL: w.URL, Sitekey: w.Sitekey, Action: w.Action, CData: w.CData})
 	if err != nil {
 		st.State = turnstile.StateUnresolved
 		st.Reason = "solver failed: " + err.Error()
+		if visualReason != "" {
+			st.Reason = "visual: " + visualReason + "; " + st.Reason
+		}
 		return st
 	}
 	if err := p.injectTurnstileToken(ctx, token); err != nil {
@@ -383,6 +514,7 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 	}
 	final := statusOf(fresh, freshInner)
 	final.Attempts, final.SolverUsed, final.CostUSD = a.cycles, true, st.CostUSD
+	final.VisualUsed, final.VisualMS = st.VisualUsed, st.VisualMS
 	if final.State != turnstile.StateSolved {
 		final.State = turnstile.StateUnresolved
 		final.Reason = "solver returned a token but the page did not accept it"
@@ -410,9 +542,11 @@ func (p *Page) turnstileToken(ctx context.Context) string {
 }
 
 func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, inner *tsInner, budget time.Duration) bool {
-	ctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
+	if budget <= 0 {
+		budget = 8 * time.Second
+	}
 	_ = p.Front(ctx)
+	start := time.Now()
 	clickedCheckbox := false
 	click := func() {
 		if inner != nil && inner.Checkbox != nil && wf != nil {
@@ -426,20 +560,17 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 		}
 	}
 	click()
-	start := time.Now()
 	lastDetect := start
 	retried := false
 	for {
-		select {
-		case <-ctx.Done():
+		if p.turnstileToken(ctx) != "" {
+			return true
+		}
+		if time.Since(start) > budget {
 			final, fcancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			ok := p.turnstileToken(final) != ""
 			fcancel()
 			return ok
-		case <-time.After(250 * time.Millisecond):
-		}
-		if p.turnstileToken(ctx) != "" {
-			return true
 		}
 		// The script renders the widget iframe after the root appears; pick
 		// up a checkbox that shows up during the wait.
@@ -462,7 +593,148 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 			}
 			click()
 		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
+}
+
+func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget time.Duration) (bool, string, bool, float64, int64) {
+	if budget <= 0 {
+		budget = 8 * time.Second
+	}
+	start := time.Now()
+	clip, err := p.turnstileVisualClip(ctx)
+	if err != nil {
+		return false, "clip failed: " + err.Error(), false, 0, 0
+	}
+	img, err := p.ScreenshotClip(ctx, clip)
+	if err != nil {
+		return false, "screenshot failed: " + err.Error(), false, 0, 0
+	}
+	// The HTTP call may be canceled safely; CDP calls above use the long
+	// context so a phase deadline cannot poison the browser connection.
+	lctx, lcancel := context.WithTimeout(ctx, budget)
+	res, err := v.Locate(lctx, img)
+	lcancel()
+	if err != nil {
+		return false, "jev failed: " + err.Error(), true, 0, 0
+	}
+	if res == nil {
+		return false, "jev returned nothing", true, 0, 0
+	}
+	cost, ms := res.CostUSD, res.MS
+	switch res.State {
+	case "verified":
+		if p.turnstileToken(ctx) != "" {
+			return true, "", true, cost, ms
+		}
+		return false, "verified but no token", true, cost, ms
+	case "image_challenge":
+		return false, "image challenge", true, cost, ms
+	}
+	if !res.Present || res.Checkbox == nil || res.BoxConfidence < 0.5 {
+		return false, fmt.Sprintf("checkbox not located (present=%v conf=%.2f)", res.Present, res.BoxConfidence), true, cost, ms
+	}
+	box := res.Checkbox
+	cx := clip.X + (box.X+box.W/2)*clip.W
+	cy := clip.Y + (box.Y+box.H/2)*clip.H
+	if _, err := p.ClickXY(ctx, cx, cy, ClickOptions{}); err != nil {
+		return false, "click failed: " + err.Error(), true, cost, ms
+	}
+	start = time.Now()
+	retried := false
+	for {
+		if p.turnstileToken(ctx) != "" {
+			return true, "", true, cost, ms
+		}
+		if time.Since(start) > budget {
+			return false, "no token after visual click", true, cost, ms
+		}
+		if !retried && time.Since(start) > 1500*time.Millisecond {
+			retried = true
+			_, _ = p.ClickXY(ctx, cx, cy, ClickOptions{})
+		}
+		select {
+		case <-ctx.Done():
+			return false, "no token after visual click", true, cost, ms
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// turnstileVisualClip frames the widget plus 40 px of context, caps the crop
+// for the image API, and picks a scale inside its 256 to 1568 px window.
+func (p *Page) turnstileVisualClip(ctx context.Context) (Clip, error) {
+	fs, err := p.frames(ctx)
+	if err != nil {
+		return Clip{}, err
+	}
+	if len(fs) == 0 {
+		return Clip{}, errors.New("no frames")
+	}
+	_ = p.eval(ctx, fs[0], `(() => {
+	  const root = document.querySelector('.cf-turnstile') || document.querySelector('[data-sitekey]');
+	  if (root) root.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+	  return true;
+	})()`, nil)
+	w, _, _, err := p.detectTurnstile(ctx)
+	if err != nil {
+		return Clip{}, err
+	}
+	if w == nil || (!w.Present && !w.Interstitial) {
+		return Clip{}, errors.New("no widget")
+	}
+	base := w.Widget
+	if base == nil || base.W <= 0 || base.H <= 0 {
+		base = w.Root
+	}
+	if base == nil || base.W <= 0 || base.H <= 0 {
+		return Clip{}, errors.New("widget has no box")
+	}
+	var vp struct {
+		W float64 `json:"w"`
+		H float64 `json:"h"`
+	}
+	if err := p.eval(ctx, fs[0], "({w:innerWidth,h:innerHeight})", &vp); err != nil {
+		return Clip{}, err
+	}
+	if vp.W <= 0 || vp.H <= 0 {
+		return Clip{}, errors.New("viewport unavailable")
+	}
+	x0 := math.Max(0, base.X-40)
+	y0 := math.Max(0, base.Y-40)
+	cw := math.Min(base.W, 900) + 80
+	ch := math.Min(base.H, 400) + 80
+	if x1 := math.Min(vp.W, x0+cw); x1 > x0 {
+		cw = x1 - x0
+	} else {
+		cw = vp.W - x0
+	}
+	if y1 := math.Min(vp.H, y0+ch); y1 > y0 {
+		ch = y1 - y0
+	} else {
+		ch = vp.H - y0
+	}
+	if cw <= 0 || ch <= 0 {
+		return Clip{}, errors.New("widget is outside the viewport")
+	}
+	if maxW := ch * (1568.0 / 256.0); cw > maxW {
+		cw = maxW
+	}
+	scale := 2.0
+	if s := 256 / math.Min(cw, ch); scale < s {
+		scale = s
+	}
+	if s := 1568 / math.Max(cw, ch); scale > s {
+		scale = s
+	}
+	if scale <= 0 {
+		scale = 1
+	}
+	return Clip{X: x0, Y: y0, W: cw, H: ch, Scale: scale}, nil
 }
 
 func (p *Page) resetTurnstileWidget(ctx context.Context) {

@@ -130,6 +130,21 @@ addEventListener('message', (e) => {
   i.value = 'noframe-token';
   out.textContent = 'solved';
 });</script>`,
+
+	// A wide root whose checkbox sits to the right: the deterministic
+	// left-center click misses, the visual box hits.
+	"/turnstile-visual": `<title>turnstile visual</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FC" style="position:relative;width:600px;height:65px">
+<label style="position:absolute;left:400px;top:12px;display:flex;align-items:center;gap:8px">
+<input type=checkbox id=cb style="width:24px;height:24px"><span>Verify you are human</span>
+</label>
+</div><p id=out></p>
+<script>cb.addEventListener('click', () => {
+  let i = document.querySelector('[name="cf-turnstile-response"]');
+  if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'cf-turnstile-response'; document.querySelector('.cf-turnstile').appendChild(i); }
+  i.value = 'visual-token';
+  out.textContent = 'solved';
+});</script>`,
 }
 
 type env struct {

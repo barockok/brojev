@@ -1,7 +1,10 @@
 package page
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +61,19 @@ type fakeSolver struct {
 func (f *fakeSolver) Solve(ctx context.Context, t turnstile.Target) (string, error) {
 	f.got = t
 	return f.token, nil
+}
+
+type fakeVisual struct {
+	box *tsRect
+	img []byte
+}
+
+func (f *fakeVisual) Locate(ctx context.Context, png []byte) (*turnstileVisualResult, error) {
+	f.img = png
+	return &turnstileVisualResult{
+		Checkbox: f.box, Present: true, BoxConfidence: 0.9, State: "checkbox",
+		CostUSD: 0.0001, MS: 12,
+	}, nil
 }
 
 func TestTurnstileAutoPass(t *testing.T) {
@@ -149,5 +165,74 @@ func TestTurnstileSnapshotLine(t *testing.T) {
 	s.Turnstile = st
 	if !strings.Contains(s.String(), "TURNSTILE: unresolved") {
 		t.Fatalf("snapshot:\n%s", s)
+	}
+}
+
+func TestTurnstileVisualPhase(t *testing.T) {
+	p, ctx := open(t, "/turnstile-visual")
+	st := p.DetectTurnstile(ctx)
+	if !st.Detected || st.Mode != turnstile.ModeManaged {
+		t.Fatalf("detection: %+v", st)
+	}
+	// The deterministic left-center click misses the checkbox at x=400.
+	clip, err := p.turnstileVisualClip(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := p.Eval(ctx, `(() => { const r=document.getElementById('cb').getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; })()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cb struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+		W float64 `json:"w"`
+		H float64 `json:"h"`
+	}
+	if err := json.Unmarshal([]byte(v), &cb); err != nil {
+		t.Fatal(err)
+	}
+	fv := &fakeVisual{box: &tsRect{
+		X: (cb.X - clip.X) / clip.W, Y: (cb.Y - clip.Y) / clip.H,
+		W: cb.W / clip.W, H: cb.H / clip.H,
+	}}
+	st = p.ensureTurnstile(ctx, turnstileOptions{
+		Total: 10 * time.Second, InPage: 200 * time.Millisecond, VisualBudget: 5 * time.Second, Visual: fv,
+	})
+	if st == nil || st.State != turnstile.StateSolved {
+		t.Fatalf("visual phase: %+v", st)
+	}
+	if !st.VisualUsed || st.SolverUsed {
+		t.Fatalf("usage: %+v", st)
+	}
+	if !bytes.HasPrefix(fv.img, []byte("\x89PNG")) {
+		t.Fatalf("locator did not receive a PNG (%d bytes)", len(fv.img))
+	}
+	got, err := p.Eval(ctx, `document.querySelector('[name="cf-turnstile-response"]').value`)
+	if err != nil || string(got) != `"visual-token"` {
+		t.Fatalf("token = %s, %v", got, err)
+	}
+}
+
+func TestTurnstileVisualJev(t *testing.T) {
+	if os.Getenv("BROJEV_VISUAL_E2E") != "1" {
+		t.Skip("set BROJEV_VISUAL_E2E=1 to call Jev with an image")
+	}
+	t.Setenv("TURNSTILE_VISUAL", "jev")
+	vis, note := turnstileVisualFromEnv()
+	if vis == nil {
+		t.Skipf("visual locator unavailable: %s", note)
+	}
+	p, ctx := open(t, "/turnstile-visual")
+	waitWidget(t, p, ctx)
+	st := p.ensureTurnstile(ctx, turnstileOptions{
+		Total: 30 * time.Second, InPage: 200 * time.Millisecond, VisualBudget: 15 * time.Second, Visual: vis,
+	})
+	t.Logf("status: %+v", st)
+	if st == nil || st.State != turnstile.StateSolved {
+		t.Fatalf("visual Jev: %+v", st)
+	}
+	if !st.VisualUsed {
+		t.Fatal("visual locator was not used")
 	}
 }

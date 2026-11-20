@@ -639,6 +639,15 @@ func doctor() error {
 	} else {
 		fmt.Printf("  [ok  ] %-18s not configured (in-page only)\n", "capsolver")
 	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TURNSTILE_VISUAL")), "jev") {
+		if key, _, _ := jev.KeyFromEnv(); key != "" {
+			fmt.Printf("  [ok  ] %-18s jev (image click before CapSolver)\n", "turnstile visual")
+		} else {
+			fmt.Printf("  [warn] %-18s jev requested but no Jev key; visual phase skipped\n", "turnstile visual")
+		}
+	} else {
+		fmt.Printf("  [ok  ] %-18s off (TURNSTILE_VISUAL=jev enables an image click)\n", "turnstile visual")
+	}
 	if failed {
 		return fmt.Errorf("some checks failed; logs in %s", daemon.Home())
 	}

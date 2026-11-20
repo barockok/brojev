@@ -32,7 +32,9 @@ type Status struct {
 	State      State   `json:"state"`
 	Attempts   int     `json:"attempts,omitempty"`
 	SolverUsed bool    `json:"solverUsed,omitempty"`
-	CostUSD    float64 `json:"costUsd,omitempty"`
+	VisualUsed bool    `json:"visualUsed,omitempty"`
+	VisualMS   int64   `json:"visualMs,omitempty"`
+	CostUSD    float64 `json:"costUsd,omitempty"` // estimated external cost: visual Jev + CapSolver
 	Reason     string  `json:"reason,omitempty"`
 }
 
