@@ -64,6 +64,35 @@ var lease struct {
 	l *daemon.LeaseConn
 }
 
+// forwardedKeys dedupes key forwarding: the daemon only needs a key it did
+// not inherit (for example a CapSolver key set after it started).
+var forwardedKeys struct {
+	sync.Mutex
+	fp string
+}
+
+// forwardKeysOnce sends the key environment to the daemon when it changed
+// since this MCP process last sent it. Page tools need the keys too: the
+// Turnstile fallback reads CAPSOLVER_API_KEY inside the daemon.
+func forwardKeysOnce(ctx context.Context) error {
+	keys := daemon.KeyEnv()
+	b, err := json.Marshal(keys)
+	if err != nil {
+		return err
+	}
+	fp := string(b)
+	forwardedKeys.Lock()
+	defer forwardedKeys.Unlock()
+	if fp == forwardedKeys.fp {
+		return nil
+	}
+	if err := daemon.CallAs(ctx, sessionID, "keys", keys, nil); err != nil {
+		return err
+	}
+	forwardedKeys.fp = fp
+	return nil
+}
+
 // holdLease keeps one connection open to the daemon so it knows this process
 // is alive, and re-opens it after a daemon restart. Best effort: without it
 // sessions are simply never cleaned up.
@@ -90,14 +119,10 @@ func call(ctx context.Context, method string, params any) (json.RawMessage, erro
 		return nil, err
 	}
 	holdLease(ctx)
-	if method == "run" {
-		// The daemon may predate this session: hand it the keys Claude Code
-		// passed us (plugin userConfig), which win over ~/.brojev/env.
-		if keys := daemon.KeyEnv(); len(keys) > 0 {
-			if err := daemon.CallAs(ctx, sessionID, "keys", keys, nil); err != nil {
-				return nil, err
-			}
-		}
+	// A missing key must not break primitives; run returns the error so a
+	// missing Jev key is reported where it matters.
+	if err := forwardKeysOnce(ctx); err != nil && method == "run" {
+		return nil, err
 	}
 	var out json.RawMessage
 	err := daemon.CallAs(ctx, sessionID, method, params, &out)

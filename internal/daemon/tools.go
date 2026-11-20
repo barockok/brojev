@@ -17,6 +17,7 @@ import (
 	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/llm"
 	"github.com/barockok/brojev/internal/page"
+	"github.com/barockok/brojev/internal/turnstile"
 )
 
 // Params is the union of all tool parameters; each tool reads what it needs.
@@ -65,8 +66,9 @@ type TabInfo struct {
 // ActionReply is what every page action returns.
 type ActionReply struct {
 	*page.Result
-	NewTabs  []TabInfo `json:"newTabs,omitempty"`
-	Snapshot string    `json:"snapshot,omitempty"`
+	NewTabs   []TabInfo         `json:"newTabs,omitempty"`
+	Snapshot  string            `json:"snapshot,omitempty"`
+	Turnstile *turnstile.Status `json:"turnstile,omitempty"`
 }
 
 var pageTools = map[string]bool{
@@ -279,11 +281,13 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, sess *session
 	}
 	switch method {
 	case "snapshot":
+		ts := p.EnsureTurnstile(ctx)
 		snap, err := p.Snapshot(ctx, page.SnapshotOptions{MaxElements: a.MaxElements, MaxText: a.MaxText})
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"text": snap.String(), "url": snap.URL, "title": snap.Title, "elements": len(snap.Elements)}, nil
+		snap.Turnstile = ts
+		return map[string]any{"text": snap.String(), "url": snap.URL, "title": snap.Title, "elements": len(snap.Elements), "turnstile": ts}, nil
 	case "screenshot":
 		img, err := p.Screenshot(ctx, a.Full)
 		if err != nil {
@@ -303,7 +307,8 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, sess *session
 		if err != nil {
 			return nil, err
 		}
-		return map[string]json.RawMessage{"value": json.RawMessage(orNull(v))}, nil
+		ts := p.EnsureTurnstile(ctx)
+		return map[string]any{"value": json.RawMessage(orNull(v)), "turnstile": ts}, nil
 	case "wait":
 		timeout := time.Duration(a.TimeoutMS) * time.Millisecond
 		if timeout <= 0 {
@@ -370,7 +375,7 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, sess *session
 		if err != nil {
 			return nil, err
 		}
-		return s.reply(ctx, b, sess, p, &page.Result{Note: fmt.Sprintf("%s %q handled (accept=%v)", d.Type, d.Message, *a.Accept)}, nil, a)
+		return s.reply(ctx, b, sess, p, &page.Result{Note: fmt.Sprintf("%s %q handled (accept=%v)", d.Type, d.Message, *a.Accept)}, nil, a, nil)
 	}
 
 	before, _ := s.sessionPages(ctx, b, sess)
@@ -439,12 +444,16 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, sess *session
 	if err != nil {
 		return nil, err
 	}
-	return s.reply(ctx, b, sess, p, r, before, a)
+	ts := p.EnsureTurnstile(ctx)
+	return s.reply(ctx, b, sess, p, r, before, a, ts)
 }
 
 // reply adds tabs opened by the action and, if asked, a fresh snapshot.
-func (s *Server) reply(ctx context.Context, b *browser.Browser, sess *session, p *page.Page, r *page.Result, before []*target.Info, a Params) (*ActionReply, error) {
+func (s *Server) reply(ctx context.Context, b *browser.Browser, sess *session, p *page.Page, r *page.Result, before []*target.Info, a Params, ts *turnstile.Status) (*ActionReply, error) {
 	out := &ActionReply{Result: r}
+	if ts != nil && ts.Detected {
+		out.Turnstile = ts
+	}
 	if before != nil {
 		seen := map[target.ID]bool{}
 		for _, t := range before {

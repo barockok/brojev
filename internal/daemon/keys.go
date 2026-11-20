@@ -10,7 +10,7 @@ import (
 // keyNames are the API key variables brojev reads, plus JEV_PROVIDER. The plugin passes them to
 // the MCP server from userConfig (OS keychain); the MCP server forwards them
 // to the long-lived daemon, which may predate this Claude session.
-var keyNames = []string{"TYPESAFE_API_KEY", "JEV_API_KEY", "OPENROUTER_API_KEY", "TEXT_MODEL_API_KEY", "JEV_PROVIDER"}
+var keyNames = []string{"TYPESAFE_API_KEY", "JEV_API_KEY", "OPENROUTER_API_KEY", "TEXT_MODEL_API_KEY", "CAPSOLVER_API_KEY", "JEV_PROVIDER"}
 
 // settingPrefix marks plugin settings in the MCP server's environment. The
 // plugin passes them under their own names (BROJEV_SETTING_OPENROUTER_API_KEY)
