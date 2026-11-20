@@ -9,7 +9,7 @@ brojev detects a Cloudflare Turnstile challenge on any page it drives and resolv
 
 Decisions from the design discussion:
 
-- Resolution scope: in-page real input first, CapSolver fallback.
+- Resolution scope: in-page real input first, then an opt-in Jev image click (`TURNSTILE_VISUAL=jev`), then CapSolver fallback.
 - Hook timing: every page call (navigate, history, reload, actions, snapshots, each run step).
 - Solver: CapSolver `AntiTurnstileTaskProxyLess`.
 - Budget: 60s per challenge by default, `TURNSTILE_TIMEOUT_MS` overrides.
@@ -31,8 +31,10 @@ New code:
 - `internal/turnstile/solver.go`: `Solver` interface.
 - `internal/turnstile/capsolver.go`: CapSolver client (`createTask`, `getTaskResult`).
 - `internal/turnstile/capsolver_test.go`: fake HTTP server tests.
-- `internal/page/turnstile.go`: page glue. `DetectTurnstile`, `EnsureTurnstile`, in-page click, token polling, token injection.
+- `internal/page/turnstile.go`: page glue. `DetectTurnstile`, `EnsureTurnstile`, in-page click, token polling, token injection, and the opt-in Jev visual phase.
 - `internal/page/turnstile_e2e_test.go`: fixture tests behind `BROJEV_E2E=1`.
+- `internal/jev`: image assets and `box`/`noul` answer support for the visual phase.
+- `internal/page/actions.go`: `ScreenshotClip` for the visual crop.
 
 Dependency direction: `internal/page` imports `internal/turnstile`. The turnstile package does not import `page` or `cdp`; the solver client is a pure HTTPS client with no browser knowledge.
 
@@ -100,7 +102,19 @@ When state is `waiting` or `error`:
 - Poll every 250 ms for a non-empty response token. A managed or invisible widget may pass without any click, so the poll runs even when no checkbox was found.
 - On `error`, reset the widget with `window.turnstile.reset()` through main-world `Page.Eval` when the API is present, otherwise click the widget's refresh control, then retry once.
 
-### 2. CapSolver fallback (rest of the budget)
+### 2. Visual phase (opt-in, up to 8 seconds)
+
+Runs only when `TURNSTILE_VISUAL=jev`, the in-page attempt failed, and a Jev key is configured.
+
+- Scroll the widget into view and capture a clipped PNG around it, with 40 px of context, clamped to the viewport and sized into the image API's 256 to 1568 px window.
+- One Jev request carries the image and four questions: `checkbox` (box), `widget` (box), `checkbox_present` (noul), and `state` (choice: checkbox, spinner, verified, image_challenge, other).
+- Gate on `checkbox_present >= 0.5`, a checkbox box, and box confidence >= 0.5. Translate the normalized box center through the clip and click with real input.
+- Poll for the token; retry the click once after 1.5 seconds. On `verified`, only check for the token. On `image_challenge`, fall through.
+- Errors fall through to CapSolver with the reason recorded. The visual phase uses the Jev key and route already configured for `run`.
+
+The visual phase validates the same token as every other tier. The screenshot and the HTTP call use separate cancellation boundaries, so a phase timeout cannot cancel an in-flight CDP write.
+
+### 3. CapSolver fallback (rest of the budget)
 
 Runs only when `CAPSOLVER_API_KEY` is set, the state is not `solved`, and a sitekey is known.
 
@@ -126,13 +140,13 @@ Runs only when `CAPSOLVER_API_KEY` is set, the state is not `solved`, and a site
 - Inject the token into `input[name="cf-turnstile-response"]` through main-world eval. Use the native value setter, then dispatch `input` and `change` events with `bubbles: true`. If no input exists, create a hidden input inside the widget container and set it the same way.
 - This covers standard form posts. Callback-only widgets that never read the input may remain unresolved; the status reports that instead of claiming success.
 
-### 3. Verification
+### 4. Verification
 
 Re-run detection. A non-empty response token is the only success criterion. The widget's own state or callback is never trusted instead.
 
 ### Bookkeeping
 
-- One in-page cycle plus one solver task per widget instance.
+- One in-page cycle, one visual request and one solver task per widget instance.
 - At most two cycles per URL plus sitekey per page load.
 - One second cooldown between cycles.
 - This prevents loops on always-failing keys, such as Cloudflare's `2x...` test key, and bounds spend to one solver task per cycle.
@@ -142,13 +156,14 @@ Re-run detection. A non-empty response token is the only success criterion. The 
 
 - `TURNSTILE_TIMEOUT_MS` default 60000, measured from the start of the first resolution attempt for a challenge.
 - In-page phase capped at 8 seconds.
+- Visual phase capped at 8 seconds for the Jev call and its click poll.
 - Solver polling gets the remainder.
 - Context cancellation aborts polling and returns the current status.
 
 ### Failure
 
 - The original action result returns unchanged.
-- When a widget was detected, the reply gains a `turnstile` object: `detected`, `sitekey`, `action`, `mode`, `state`, `attempts`, `solverUsed`, `reason`.
+- When a widget was detected, the reply gains a `turnstile` object: `detected`, `sitekey`, `action`, `mode`, `state`, `attempts`, `solverUsed`, `visualUsed`, `visualMs`, `costUsd`, `reason`.
 - The rendered reply gets one short note line, for example `TURNSTILE: unsolved (in-page failed, solver disabled)`.
 - No hard error, since an unrelated click should not fail because a background widget did not solve.
 - `run` returns `blocked` with `turnstile unsolved: <reason>` only when the page has no usable interactive content: an interstitial, or a page whose only actionable content is the widget.
@@ -157,9 +172,10 @@ Re-run detection. A non-empty response token is the only success criterion. The 
 
 - `CAPSOLVER_API_KEY`: environment, `~/.brojev/env`, or a new sensitive `capsolver_api_key` plugin setting.
 - Plumbed like existing keys: `.claude-plugin/plugin.json` `userConfig`, `.mcp.json` environment as `BROJEV_SETTING_CAPSOLVER_API_KEY`, and `keyNames` in `internal/daemon/keys.go` so every session forwards it to a daemon that predates the key.
+- `TURNSTILE_VISUAL=jev` enables the Jev image click. It uses the existing `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` and the configured Jev route. Default is off. The image path is validated through TypeSafe; OpenRouter image routing is untested.
 - `TURNSTILE_TIMEOUT_MS`, default 60000.
-- The solver is enabled only when a key is configured. Without one, brojev does the in-page attempt and reports status; it never silently skips detection.
-- `brojev doctor` adds one line: `capsolver: configured` or `capsolver: not configured (in-page only)`. The key itself is never printed.
+- The solver is enabled only when a key is configured. Without one, brojev does the in-page and visual attempts and reports status; it never silently skips detection.
+- `brojev doctor` prints `capsolver: configured` or `not configured`, and `turnstile visual: jev` or `off`. Keys are never printed.
 - No new MCP tool. Status rides on existing replies and the run outcome.
 - When a widget is detected, the rendered snapshot includes one line: `TURNSTILE: solved` or `TURNSTILE: unresolved (<reason>)`.
 - Detection runs in the isolated world because it only reads the DOM. Reset, injection and event dispatch use main-world `Page.Eval`, where `window.turnstile` and the page's own event handlers live.
@@ -167,17 +183,20 @@ Re-run detection. A non-empty response token is the only success criterion. The 
 ## Cost and privacy
 
 - CapSolver lists Cloudflare Turnstile at $1.20 per 1,000 tasks, so about $0.0012 per solve. Checked 2026-11-20 at `https://docs.capsolver.com/en/pricing/`.
-- The in-page attempt costs nothing and should resolve most managed widgets. The solver runs only on fallback, at most once per cycle.
+- The visual Jev request costs about $0.00005 to $0.00025 per attempt depending on clip size and model. Measured 2026-11-20: $0.00025 for a 1360x290 PNG against `jev-latest`. It is roughly 5 to 20 times cheaper than CapSolver and a few hundred milliseconds faster.
+- The in-page attempt costs nothing and resolves most managed widgets. The visual request and solver run only on fallback, at most once per cycle.
 - Sent to CapSolver: page URL, sitekey, action, cdata. Nothing else.
-- Never sent: cookies, storage, form values, page text, screenshots, the CapSolver key in logs.
-- The key lives where the other brojev keys live: plugin settings in the OS keychain, or `~/.brojev/env` with mode 0600.
-- The README privacy table gains a CapSolver row.
+- Sent to Jev for the visual phase: a clipped PNG around the widget, including up to 40 px of surrounding pixels, plus the four visual questions.
+- Never sent: cookies, storage, form values outside the clipped image, screenshots to CapSolver, or keys in logs.
+- Keys live where the other brojev keys live: plugin settings in the OS keychain, or `~/.brojev/env` with mode 0600.
+- The README privacy table gains rows for the visual image and CapSolver.
 
 ## Testing
 
 Unit tests:
 
 - `internal/turnstile`: CapSolver client against `httptest` for success, API error, polling timeout, and context cancellation. No network and no paid calls.
+- `internal/jev`: the image request shape, the danger-zone header, and box/noul answer parsing.
 - Detection parsing and status transitions where they can be exercised without a browser.
 
 E2E tests, gated by `BROJEV_E2E=1`:
@@ -188,18 +207,19 @@ E2E tests, gated by `BROJEV_E2E=1`:
   - `3x00000000000000000000FF`: forces an interactive challenge.
 - Cases: detection reports present, sitekey and mode; `1x` reaches `solved` without a click; `3x` exercises the real interactive click; `2x` exercises the failure status and the solver injection path; a local widget fixture exercises the click path end to end.
 - A local cross-site widget (a frame with a real checkbox and a parent that fills the response input) covers the click path without Cloudflare, and a local visible-root fixture covers explicit-render widgets that draw in a closed shadow root with no frame.
+- Visual phase: a fake locator test verifies the screenshot, the normalized box translation and the click. A real Jev test behind `BROJEV_VISUAL_E2E=1` runs the production image client against the local widget and asserts `visualUsed`.
 - The fixtures need `challenges.cloudflare.com`; skip with a clear message if it is unreachable.
 - Existing page, agent, MCP and browser suites must stay green.
 
 ## Spike: Jev visual checkbox
 
-`spike/jev-click/` is the experiment behind the current fallback order. It asked Jev to locate the "Verify you are human" checkbox from a clipped screenshot and clicked the returned box. Results: 10/10 tokens on Cloudflare's `3x` key, box confidence 0.78 to 0.84, about 289 ms and $0.00005 per solve.
+`spike/jev-click/` is the experiment behind the visual phase. It asked Jev to locate the "Verify you are human" checkbox from a clipped screenshot and clicked the returned box. Results: 10/10 tokens on Cloudflare's `3x` key, box confidence 0.78 to 0.84, about 289 ms and $0.00005 per solve.
 
-The spike is committed as a reproducible experiment, not wired into the resolver. The deterministic blind click already solves `3x` in this harness, and CapSolver remains the token fallback. If the visual phase is added later, it should run after the deterministic click and before CapSolver, behind `TURNSTILE_VISUAL=jev`, as the spike recommends.
+The visual phase is now wired in behind `TURNSTILE_VISUAL=jev`, after the deterministic click and before CapSolver. The deterministic blind click still runs first because it is free and solves the standard widgets; the visual phase is for layouts where the checkbox is not at the blind point. The real Jev E2E solved a local widget in one run with `visualUsed=true`, about 652 ms, and about $0.00025 for the larger clip.
 
-The spike also found widgets drawn in a closed shadow root with no iframe. Detection now treats a visible rendered widget root (at least 100x30 CSS px) as managed when no frame is visible, and clicks its left-center.
+The spike also found widgets drawn in a closed shadow root with no iframe. Detection treats a visible rendered widget root (at least 100x30 CSS px) as managed when no frame is visible, and clicks its left-center.
 
-Manual check: run a real Turnstile page in the brojev Chrome window with and without `CAPSOLVER_API_KEY`.
+Manual check: run a real Turnstile page in the brojev Chrome window with `CAPSOLVER_API_KEY` and `TURNSTILE_VISUAL=jev` set and unset.
 
 ## Documentation
 
