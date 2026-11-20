@@ -401,9 +401,11 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	_ = p.Front(ctx)
+	clickedCheckbox := false
 	click := func() {
 		if inner != nil && inner.Checkbox != nil && wf != nil {
 			if p.clickTurnstileCheckbox(ctx, wf, inner.Checkbox) == nil {
+				clickedCheckbox = true
 				return
 			}
 		}
@@ -413,6 +415,7 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 	}
 	click()
 	start := time.Now()
+	lastDetect := start
 	retried := false
 	for {
 		select {
@@ -426,9 +429,25 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 		if p.turnstileToken(ctx) != "" {
 			return true
 		}
-		if !retried && time.Since(start) > 2*time.Second {
+		// The script renders the widget iframe after the root appears; pick
+		// up a checkbox that shows up during the wait.
+		if time.Since(lastDetect) > 750*time.Millisecond {
+			lastDetect = time.Now()
+			if cw, cwf, cinner, err := p.detectTurnstile(ctx); err == nil {
+				if cw.Widget != nil {
+					w.Widget = cw.Widget
+				}
+				wf, inner = cwf, cinner
+				if inner != nil && inner.Checkbox != nil && !clickedCheckbox {
+					click()
+				}
+			}
+		}
+		if !retried && time.Since(start) > 3*time.Second {
 			retried = true
-			p.resetTurnstileWidget(ctx)
+			if inner != nil && turnstileWidgetError(inner.Text) {
+				p.resetTurnstileWidget(ctx)
+			}
 			click()
 		}
 	}
