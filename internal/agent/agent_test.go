@@ -24,6 +24,7 @@ import (
 	"github.com/barockok/brojev/internal/chrome"
 	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/page"
+	"github.com/barockok/brojev/internal/turnstile"
 )
 
 const formHTML = `<!doctype html><title>signup</title>
@@ -46,8 +47,26 @@ func TestMain(m *testing.M) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		if r.URL.Path == "/popup" {
+		switch r.URL.Path {
+		case "/popup":
 			fmt.Fprint(w, `<!doctype html><title>help</title><p>help center</p>`)
+			return
+		case "/fake-widget":
+			fmt.Fprint(w, `<!doctype html><title>fake widget</title><label><input type=checkbox id=cb> Verify you are human</label>
+<script>cb.addEventListener('click', () => parent.postMessage('agent-token', '*'));</script>`)
+			return
+		case "/turnstile":
+			fmt.Fprint(w, `<!doctype html><title>turnstile</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FA"><iframe id=w style="width:300px;height:65px;border:1px solid"></iframe></div><p id=out></p>
+<script>
+w.src = location.href.replace('127.0.0.1', 'localhost').replace('/turnstile', '/fake-widget');
+addEventListener('message', (e) => {
+  let i = document.querySelector('[name="cf-turnstile-response"]');
+  if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'cf-turnstile-response'; document.querySelector('.cf-turnstile').appendChild(i); }
+  i.value = e.data;
+  out.textContent = 'solved';
+});
+</script>`)
 			return
 		}
 		fmt.Fprint(w, formHTML)
@@ -277,5 +296,23 @@ func TestMissingValueAsksClaude(t *testing.T) {
 	}
 	if out.Status != "blocked" {
 		t.Fatalf("outcome: %+v", out)
+	}
+}
+
+func TestTurnstileSolvedBeforeJev(t *testing.T) {
+	e := newEnv(t)
+	j, _ := fakeJev(t, func(r *req) (string, string, float64) { return "DONE", "", 0.9 })
+	out, err := (&Runner{Jev: j, Env: e}).Run(context.Background(), Task{Goal: "open the page", URL: base + "/turnstile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "done" {
+		t.Fatalf("outcome: %s %s", out.Status, out.Reason)
+	}
+	if out.Turnstile == nil || out.Turnstile.State != turnstile.StateSolved {
+		t.Fatalf("turnstile: %+v", out.Turnstile)
+	}
+	if !strings.Contains(out.Snapshot, "TURNSTILE: solved") {
+		t.Fatalf("snapshot:\n%s", out.Snapshot)
 	}
 }
