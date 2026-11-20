@@ -13,6 +13,7 @@ import (
 
 	cdproto "github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/cdp/jsonv2"
+	cdppage "github.com/chromedp/cdproto/page"
 
 	"github.com/barockok/brojev/internal/jev"
 	"github.com/barockok/brojev/internal/turnstile"
@@ -605,6 +606,9 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 	if budget <= 0 {
 		budget = 8 * time.Second
 	}
+	// A background tab can stall Page.captureScreenshot on headless Linux
+	// even when focus emulation reports it visible.
+	_, _ = cdproto.Call(ctx, p.S, cdppage.BringToFront, cdproto.Empty{})
 	start := time.Now()
 	clip, err := p.turnstileVisualClip(ctx)
 	if err != nil {
