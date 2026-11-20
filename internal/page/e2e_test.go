@@ -100,6 +100,24 @@ knob.onpointerup = e => { if (down !== null) out.textContent = 'knob moved ' + M
 	"/turnstile-force": `<title>turnstile force</title>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <div class="cf-turnstile" data-sitekey="3x00000000000000000000FF"></div><p id=out></p>`,
+
+	// A local widget with the same shape as Turnstile: a root, a cross-site
+	// iframe with a checkbox, and a response input the parent fills when the
+	// checkbox reports success. Exercises the in-page click path without
+	// Cloudflare.
+	"/turnstile-fake": `<title>turnstile fake</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FA"><iframe id=w style="width:300px;height:65px;border:1px solid"></iframe></div><p id=out></p>
+<script>
+w.src = location.href.replace('127.0.0.1', 'localhost').replace('/turnstile-fake', '/fake-turnstile');
+addEventListener('message', (e) => {
+  let i = document.querySelector('[name="cf-turnstile-response"]');
+  if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'cf-turnstile-response'; document.querySelector('.cf-turnstile').appendChild(i); }
+  i.value = e.data;
+  out.textContent = 'solved';
+});
+</script>`,
+	"/fake-turnstile": `<title>fake widget</title><label><input type=checkbox id=cb> Verify you are human</label>
+<script>cb.addEventListener('click', () => parent.postMessage('local-token', '*'));</script>`,
 }
 
 type env struct {

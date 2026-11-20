@@ -2,6 +2,7 @@ package page
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,5 +47,71 @@ func TestTurnstileDetect(t *testing.T) {
 	p2, ctx2 := open(t, "/form")
 	if st := p2.DetectTurnstile(ctx2); st.Detected || st.State != turnstile.StateAbsent {
 		t.Fatalf("form page: %+v", st)
+	}
+}
+
+type fakeSolver struct {
+	token string
+	got   turnstile.Target
+}
+
+func (f *fakeSolver) Solve(ctx context.Context, t turnstile.Target) (string, error) {
+	f.got = t
+	return f.token, nil
+}
+
+func TestTurnstileAutoPass(t *testing.T) {
+	p, ctx := open(t, "/turnstile-pass")
+	waitWidget(t, p, ctx)
+	st := p.EnsureTurnstile(ctx)
+	if st == nil || st.State != turnstile.StateSolved {
+		t.Fatalf("pass key: %+v", st)
+	}
+	if st.SolverUsed {
+		t.Fatal("solver used for a passing widget")
+	}
+}
+
+func TestTurnstileClick(t *testing.T) {
+	p, ctx := open(t, "/turnstile-fake")
+	waitWidget(t, p, ctx)
+	st := p.EnsureTurnstile(ctx)
+	if st == nil || st.State != turnstile.StateSolved {
+		t.Fatalf("local widget: %+v", st)
+	}
+	v, err := p.Eval(ctx, `document.querySelector('[name="cf-turnstile-response"]')?.value`)
+	if err != nil || string(v) != `"local-token"` {
+		t.Fatalf("token = %s, %v", v, err)
+	}
+}
+
+func TestTurnstileSolverInjection(t *testing.T) {
+	p, ctx := open(t, "/turnstile-block")
+	waitWidget(t, p, ctx)
+	fs := &fakeSolver{token: "test-token"}
+	st := p.ensureTurnstile(ctx, turnstileOptions{
+		Total: 5 * time.Second, InPage: 300 * time.Millisecond, Solver: fs,
+	})
+	if st == nil || st.State != turnstile.StateSolved || !st.SolverUsed {
+		t.Fatalf("solver: %+v", st)
+	}
+	if fs.got.Sitekey != "2x00000000000000000000AB" || fs.got.URL == "" {
+		t.Fatalf("solver target: %+v", fs.got)
+	}
+	v, err := p.Eval(ctx, `document.querySelector('[name="cf-turnstile-response"]').value`)
+	if err != nil || string(v) != `"test-token"` {
+		t.Fatalf("injected token = %s, %v", v, err)
+	}
+}
+
+func TestTurnstileNoSolverIsReported(t *testing.T) {
+	p, ctx := open(t, "/turnstile-block")
+	waitWidget(t, p, ctx)
+	st := p.ensureTurnstile(ctx, turnstileOptions{Total: 2 * time.Second, InPage: 200 * time.Millisecond})
+	if st == nil || st.State != turnstile.StateUnresolved || st.SolverUsed {
+		t.Fatalf("no solver: %+v", st)
+	}
+	if !strings.Contains(st.Reason, "CapSolver") {
+		t.Fatalf("reason = %q", st.Reason)
 	}
 }
