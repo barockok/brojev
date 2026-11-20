@@ -87,6 +87,19 @@ knob.onpointerup = e => { if (down !== null) out.textContent = 'knob moved ' + M
 
 	"/nav":  `<title>nav one</title><a href="/nav2">Next page</a>`,
 	"/nav2": `<title>nav two</title><p>arrived</p>`,
+
+	// Cloudflare's published test sitekeys: 1x always passes, 2x always
+	// blocks, 3x forces an interactive challenge. The fixtures need network
+	// access to challenges.cloudflare.com.
+	"/turnstile-pass": `<title>turnstile pass</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div><p id=out></p>`,
+	"/turnstile-block": `<title>turnstile block</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="2x00000000000000000000AB"></div><p id=out></p>`,
+	"/turnstile-force": `<title>turnstile force</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="3x00000000000000000000FF"></div><p id=out></p>`,
 }
 
 type env struct {
