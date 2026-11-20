@@ -118,6 +118,18 @@ addEventListener('message', (e) => {
 </script>`,
 	"/fake-turnstile": `<title>fake widget</title><label><input type=checkbox id=cb> Verify you are human</label>
 <script>cb.addEventListener('click', () => parent.postMessage('local-token', '*'));</script>`,
+
+	// Explicit-render shapes can draw the widget in a closed shadow root with
+	// no iframe of its own; a visible root is the only signal. The click
+	// handler stands in for Cloudflare's visual widget.
+	"/turnstile-noframe": `<title>turnstile noframe</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FB"><div id=cb role=checkbox style="width:300px;height:65px;border:1px solid">Verify you are human</div></div><p id=out></p>
+<script>cb.addEventListener('click', () => {
+  let i = document.querySelector('[name="cf-turnstile-response"]');
+  if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'cf-turnstile-response'; document.querySelector('.cf-turnstile').appendChild(i); }
+  i.value = 'noframe-token';
+  out.textContent = 'solved';
+});</script>`,
 }
 
 type env struct {

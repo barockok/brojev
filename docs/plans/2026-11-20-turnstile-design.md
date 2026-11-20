@@ -69,7 +69,7 @@ Sources, in order of preference:
 - `sitekey`, `action`, `cdata`: `data-sitekey`, `data-action`, `data-cdata` attributes on the widget root.
 - Widget frame: the child frame drawn inside the widget root, found through the CDP frame tree and its box. The iframe can live in a shadow root, so `document.querySelector('iframe')` is not reliable. A Cloudflare `challenges.cloudflare.com/turnstile/` frame is used when present.
 - Response value: `input[name="cf-turnstile-response"]`, then `textarea[name="cf-turnstile-response"]`, then any `[name="cf-turnstile-response"]`.
-- Mode: `managed` when the widget frame is visible, `invisible` when the widget exists without a visible frame, `unknown` otherwise.
+- Mode: `managed` when the widget frame is visible, or when the rendered widget root is at least 100x30 CSS px (explicit-render widgets can draw in a closed shadow root with no frame); `invisible` otherwise.
 - Error: visible widget error text, for example "Verification failed", or a Turnstile error code when one is detectable.
 
 A full-page Cloudflare interstitial (title "Just a moment...", `#challenge-stage`, or a challenge URL pattern) is classified as `interstitial` and is never sent to the Turnstile solver.
@@ -186,10 +186,18 @@ E2E tests, gated by `BROJEV_E2E=1`:
   - `1x00000000000000000000AA`: always passes.
   - `2x00000000000000000000AB`: always blocks.
   - `3x00000000000000000000FF`: forces an interactive challenge.
-- Cases: detection reports present, sitekey and mode; `1x` reaches `solved` without a click; `2x` exercises the failure status and the solver injection path; a local widget fixture exercises the click path end to end.
-- Cloudflare's `3x` key can stay in its "Checking your Browser..." state under remote-debugging Chrome, so the click path is tested with a local widget (a cross-site iframe with a real checkbox and a parent that fills the response input) instead of relying on `3x`.
+- Cases: detection reports present, sitekey and mode; `1x` reaches `solved` without a click; `3x` exercises the real interactive click; `2x` exercises the failure status and the solver injection path; a local widget fixture exercises the click path end to end.
+- A local cross-site widget (a frame with a real checkbox and a parent that fills the response input) covers the click path without Cloudflare, and a local visible-root fixture covers explicit-render widgets that draw in a closed shadow root with no frame.
 - The fixtures need `challenges.cloudflare.com`; skip with a clear message if it is unreachable.
 - Existing page, agent, MCP and browser suites must stay green.
+
+## Spike: Jev visual checkbox
+
+`spike/jev-click/` is the experiment behind the current fallback order. It asked Jev to locate the "Verify you are human" checkbox from a clipped screenshot and clicked the returned box. Results: 10/10 tokens on Cloudflare's `3x` key, box confidence 0.78 to 0.84, about 289 ms and $0.00005 per solve.
+
+The spike is committed as a reproducible experiment, not wired into the resolver. The deterministic blind click already solves `3x` in this harness, and CapSolver remains the token fallback. If the visual phase is added later, it should run after the deterministic click and before CapSolver, behind `TURNSTILE_VISUAL=jev`, as the spike recommends.
+
+The spike also found widgets drawn in a closed shadow root with no iframe. Detection now treats a visible rendered widget root (at least 100x30 CSS px) as managed when no frame is visible, and clicks its left-center.
 
 Manual check: run a real Turnstile page in the brojev Chrome window with and without `CAPSOLVER_API_KEY`.
 

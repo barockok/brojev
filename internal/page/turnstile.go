@@ -107,6 +107,7 @@ func (p *Page) detectTurnstile(ctx context.Context) (*tsWidget, *frame, *tsInner
 		return &w, nil, nil, nil
 	}
 	var wf *frame
+	rootManaged := w.Root != nil && w.Root.W >= 100 && w.Root.H >= 30
 	if len(fs) > 1 {
 		origin, clip := p.offsets(ctx, fs)
 		wf = pickTurnstileFrame(fs, origin, clip, w.Root)
@@ -116,15 +117,26 @@ func (p *Page) detectTurnstile(ctx context.Context) (*tsWidget, *frame, *tsInner
 				w.Widget = &tsRect{X: o.X, Y: o.Y, W: o.W, H: o.H}
 			}
 			c := clip[wf.ID]
-			if c.W > 0 && c.H > 0 {
+			switch {
+			case c.W > 0 && c.H > 0:
 				w.Mode = "managed"
-			} else {
+			case rootManaged:
+				// Explicit-render widgets can draw the checkbox in a closed
+				// shadow root with no frame of their own. A visible rendered
+				// root is enough to treat it as managed.
+				w.Mode = "managed"
+				w.Widget = w.Root
+			default:
 				w.Mode = "invisible"
 			}
 		}
 	}
 	if w.Mode == "" {
-		w.Mode = "invisible"
+		if rootManaged {
+			w.Mode = "managed"
+		} else {
+			w.Mode = "invisible"
+		}
 	}
 	if w.Widget == nil {
 		w.Widget = w.Root

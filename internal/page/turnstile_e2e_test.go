@@ -85,6 +85,31 @@ func TestTurnstileClick(t *testing.T) {
 	}
 }
 
+func TestTurnstileForceClick(t *testing.T) {
+	p, ctx := open(t, "/turnstile-force")
+	waitWidget(t, p, ctx)
+	st := p.EnsureTurnstile(ctx)
+	if st == nil || st.State != turnstile.StateSolved {
+		t.Fatalf("3x key: %+v", st)
+	}
+}
+
+func TestTurnstileVisibleRootWithoutFrame(t *testing.T) {
+	p, ctx := open(t, "/turnstile-noframe")
+	st := p.DetectTurnstile(ctx)
+	if !st.Detected || st.Mode != turnstile.ModeManaged {
+		t.Fatalf("detection: %+v", st)
+	}
+	st = p.EnsureTurnstile(ctx)
+	if st == nil || st.State != turnstile.StateSolved {
+		t.Fatalf("no-frame widget: %+v", st)
+	}
+	v, err := p.Eval(ctx, `document.querySelector('[name="cf-turnstile-response"]')?.value`)
+	if err != nil || string(v) != `"noframe-token"` {
+		t.Fatalf("token = %s, %v", v, err)
+	}
+}
+
 func TestTurnstileSolverInjection(t *testing.T) {
 	p, ctx := open(t, "/turnstile-block")
 	waitWidget(t, p, ctx)

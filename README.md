@@ -94,7 +94,7 @@ Local state lives in `~/.brojev` (profiles, downloads, saved cookie/storage stat
 
 brojev detects Turnstile widgets and resolves them itself, on every page call: after navigation and each action, before snapshots, and inside every `run` step. The calling agent does not get a captcha step.
 
-1. In-page attempt: brojev clicks the widget's checkbox inside its iframe with real CDP mouse input and waits up to 8 seconds for the `cf-turnstile-response` token. Widgets that pass without interaction are picked up by the same poll.
+1. In-page attempt: brojev clicks the widget's checkbox inside its iframe, or the widget's left-center when it draws in a closed shadow root without a frame, and waits up to 8 seconds for the `cf-turnstile-response` token. Widgets that pass without interaction are picked up by the same poll.
 2. CapSolver fallback: if the in-page attempt fails and `CAPSOLVER_API_KEY` is set, brojev sends the page URL, sitekey, `data-action` and `data-cdata` to CapSolver (`AntiTurnstileTaskProxyLess`), then injects the returned token into the response input. CapSolver lists Turnstile at $1.20 per 1,000 solves, so about $0.0012 per task. Without a key, brojev stays in-page only.
 
 The whole attempt is bounded by `TURNSTILE_TIMEOUT_MS` (default 60000), with at most two attempts per widget on a page. When a widget is present, replies and snapshots carry one line:
