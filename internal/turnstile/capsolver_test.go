@@ -95,7 +95,10 @@ func TestStatusLine(t *testing.T) {
 		{nil, ""},
 		{&Status{State: StateAbsent}, ""},
 		{&Status{Detected: true, State: StateSolved}, "TURNSTILE: solved"},
+		{&Status{Detected: true, State: StateSolved, Widgets: 2}, "TURNSTILE: solved"},
 		{&Status{Detected: true, State: StateUnresolved, Reason: "solver disabled"}, "TURNSTILE: unresolved (solver disabled)"},
+		{&Status{Detected: true, State: StateUnresolved, Widgets: 2, Unsolved: 1}, "TURNSTILE: unresolved (1 of 2 widgets)"},
+		{&Status{Detected: true, State: StateUnresolved, Widgets: 2, Unsolved: 1, Reason: "1 of 2 widgets unsolved: waiting for token"}, "TURNSTILE: unresolved (1 of 2 widgets unsolved: waiting for token)"},
 		{&Status{Detected: true, State: StateInterstitial}, "TURNSTILE: interstitial (full-page Cloudflare challenge)"},
 	}
 	for _, c := range cases {

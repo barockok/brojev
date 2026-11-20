@@ -175,7 +175,7 @@ func TestTurnstileVisualPhase(t *testing.T) {
 		t.Fatalf("detection: %+v", st)
 	}
 	// The deterministic left-center click misses the checkbox at x=400.
-	clip, err := p.turnstileVisualClip(ctx)
+	clip, err := p.turnstileVisualClip(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,5 +234,70 @@ func TestTurnstileVisualJev(t *testing.T) {
 	}
 	if !st.VisualUsed {
 		t.Fatal("visual locator was not used")
+	}
+}
+
+func TestTurnstileMultipleLocal(t *testing.T) {
+	p, ctx := open(t, "/turnstile-multi")
+	st := p.DetectTurnstile(ctx)
+	if !st.Detected {
+		t.Fatalf("multi widget not detected: %+v", st)
+	}
+	st = p.EnsureTurnstile(ctx)
+	v1, _ := p.Eval(ctx, `document.getElementById("r1").value`)
+	v2, _ := p.Eval(ctx, `document.getElementById("r2").value`)
+	t.Logf("status: %+v tokens: %s %s", st, v1, v2)
+	if st.State != turnstile.StateSolved {
+		t.Fatalf("state: %+v", st)
+	}
+	if string(v1) != `"token-1"` || string(v2) != `"token-2"` {
+		t.Fatalf("both widgets must be solved: r1=%s r2=%s (%+v)", v1, v2, st)
+	}
+}
+
+func waitTwoWidgetFrames(t *testing.T, p *Page, ctx context.Context) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		fs, err := p.frames(ctx)
+		if err == nil {
+			n := 0
+			for _, f := range fs {
+				if strings.Contains(f.URL, "challenges.cloudflare.com") && strings.Contains(f.URL, "/turnstile/") {
+					n++
+				}
+			}
+			if n >= 2 {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Skip("two Turnstile widgets did not load (challenges.cloudflare.com unreachable or blocked)")
+}
+
+func TestTurnstileMultipleReal(t *testing.T) {
+	p, ctx := open(t, "/turnstile-multi-real")
+	waitTwoWidgetFrames(t, p, ctx)
+	st := p.EnsureTurnstile(ctx)
+	v, err := p.Eval(ctx, `[...document.querySelectorAll('[name="cf-turnstile-response"]')].map(e => e.value.length)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lens []int
+	if err := json.Unmarshal([]byte(v), &lens); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("status: %+v token lengths: %v", st, lens)
+	if st.State != turnstile.StateSolved {
+		t.Fatalf("state: %+v", st)
+	}
+	if len(lens) != 2 {
+		t.Fatalf("want 2 response inputs, got %v", lens)
+	}
+	for i, n := range lens {
+		if n == 0 {
+			t.Fatalf("widget %d has no token: %v (%+v)", i+1, lens, st)
+		}
 	}
 }

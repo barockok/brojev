@@ -19,8 +19,7 @@ import (
 	"github.com/barockok/brojev/internal/turnstile"
 )
 
-const turnstileDetectJS = `(() => {
-  const out = {present:false, interstitial:false, sitekey:"", action:"", cdata:"", token:"", root:null, url:location.href};
+const turnstileRootsJS = `(() => {
   const roots = [];
   const push = (el) => { if (el && !roots.includes(el)) roots.push(el); };
   for (const el of document.querySelectorAll('.cf-turnstile')) push(el);
@@ -28,26 +27,56 @@ const turnstileDetectJS = `(() => {
     const k = (el.getAttribute('data-sitekey') || '').trim();
     if (/^[0-3]x[0-9A-Za-z]/.test(k)) push(el);
   }
-  const tokEl = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
-  if (!roots.length && tokEl) push(tokEl.closest('.cf-turnstile') || tokEl.parentElement || tokEl);
-  if (!roots.length) {
+  for (const input of document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]')) {
+    push(input.closest('.cf-turnstile') || input.parentElement || input);
+  }
+  return roots.filter(el => !roots.some(o => o !== el && o.contains(el)));
+})()`
+
+const turnstileDetectJS = `(() => {
+  const out = {interstitial:false, widgets:[], url:location.href};
+  const top = ` + turnstileRootsJS + `;
+  if (!top.length) {
     const title = (document.title || "").trim().toLowerCase();
     out.interstitial = !!document.querySelector('#challenge-stage, #cf-challenge-running, .cf-browser-verification')
       || title === "just a moment..." || title.indexOf("attention required") === 0;
     return out;
   }
-  out.present = true;
-  const root = roots[0];
-  const get = (k) => (root.getAttribute && root.getAttribute(k)) || (root.querySelector && root.querySelector("[" + k + "]")?.getAttribute(k)) || "";
-  out.sitekey = get("data-sitekey");
-  out.action = get("data-action");
-  out.cdata = get("data-cdata");
-  const tok = (root.querySelector && root.querySelector('[name="cf-turnstile-response"]')) || tokEl;
-  out.token = tok ? String(tok.value || "") : "";
-  const r = root.getBoundingClientRect();
-  out.root = {x:r.x, y:r.y, w:r.width, h:r.height};
+  const fallback = top.length === 1 ? document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]') : null;
+  for (const root of top) {
+    const get = (k) => (root.getAttribute && root.getAttribute(k)) || (root.querySelector && root.querySelector("[" + k + "]")?.getAttribute(k)) || "";
+    const tok = (root.querySelector && root.querySelector('[name="cf-turnstile-response"]')) || fallback;
+    const r = root.getBoundingClientRect();
+    out.widgets.push({
+      sitekey: get("data-sitekey"),
+      action: get("data-action"),
+      cdata: get("data-cdata"),
+      token: tok ? String(tok.value || "") : "",
+      root: {x:r.x, y:r.y, w:r.width, h:r.height}
+    });
+  }
   return out;
 })()`
+
+func turnstileTokenAtJS(i int) string {
+	return fmt.Sprintf(`(() => {
+  const top = %s;
+  const root = top[%d];
+  const sel = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]';
+  const el = (root && root.querySelector(sel)) || (top.length === 1 ? document.querySelector(sel) : null);
+  return el ? String(el.value || "") : "";
+})()`, turnstileRootsJS, i)
+}
+
+func turnstileScrollAtJS(i int) string {
+	return fmt.Sprintf(`(() => {
+  const top = %s;
+  const root = top[%d];
+  if (!root) return false;
+  root.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+  return true;
+})()`, turnstileRootsJS, i)
+}
 
 const turnstileWidgetJS = `(() => {
   const box = (el) => { const r = el.getBoundingClientRect(); return {x:r.x, y:r.y, w:r.width, h:r.height}; };
@@ -74,6 +103,7 @@ type tsRect struct {
 }
 
 type tsWidget struct {
+	Index        int     `json:"-"`
 	Present      bool    `json:"present"`
 	Interstitial bool    `json:"interstitial"`
 	Sitekey      string  `json:"sitekey"`
@@ -86,98 +116,140 @@ type tsWidget struct {
 	URL          string  `json:"url"`
 }
 
+type tsWidgetInfo struct {
+	w     *tsWidget
+	frame *frame
+	inner *tsInner
+}
+
 type tsInner struct {
 	Checkbox *tsRect `json:"checkbox"`
 	Text     string  `json:"text"`
 }
 
-// detectTurnstile returns the widget model, its frame (when brojev has a
-// session for it), and the widget-internal state. The widget iframe can sit
-// in a closed shadow root, so the frame is found through the CDP frame tree
-// and its box, not through document.querySelector.
-func (p *Page) detectTurnstile(ctx context.Context) (*tsWidget, *frame, *tsInner, error) {
+// detectTurnstiles returns every widget on the page, each with its frame
+// (when brojev has a session for it) and the widget-internal state. Widget
+// iframes can sit in closed shadow roots, so frames are found through the CDP
+// frame tree and their boxes, not through document.querySelector.
+func (p *Page) detectTurnstiles(ctx context.Context) ([]*tsWidgetInfo, bool, error) {
 	if p.OpenDialog() != nil {
-		return nil, nil, nil, ErrDialogOpen
+		return nil, false, ErrDialogOpen
 	}
 	fs, err := p.frames(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, false, err
 	}
-	var w tsWidget
-	if err := p.eval(ctx, fs[0], turnstileDetectJS, &w); err != nil {
-		return nil, nil, nil, err
+	var raw struct {
+		Interstitial bool   `json:"interstitial"`
+		URL          string `json:"url"`
+		Widgets      []struct {
+			Sitekey string  `json:"sitekey"`
+			Action  string  `json:"action"`
+			CData   string  `json:"cdata"`
+			Token   string  `json:"token"`
+			Root    *tsRect `json:"root"`
+		} `json:"widgets"`
 	}
-	if !w.Present {
-		return &w, nil, nil, nil
+	if err := p.eval(ctx, fs[0], turnstileDetectJS, &raw); err != nil {
+		return nil, false, err
 	}
-	var wf *frame
-	rootManaged := w.Root != nil && w.Root.W >= 100 && w.Root.H >= 30
+	if raw.Interstitial {
+		return nil, true, nil
+	}
+	if len(raw.Widgets) == 0 {
+		return nil, false, nil
+	}
+	var origin, clip map[cdproto.FrameID]box
 	if len(fs) > 1 {
-		origin, clip := p.offsets(ctx, fs)
-		wf = pickTurnstileFrame(fs, origin, clip, w.Root)
+		origin, clip = p.offsets(ctx, fs)
+	}
+	used := map[cdproto.FrameID]bool{}
+	out := make([]*tsWidgetInfo, 0, len(raw.Widgets))
+	for i, rw := range raw.Widgets {
+		w := &tsWidget{
+			Index: i, Present: true, Sitekey: rw.Sitekey, Action: rw.Action,
+			CData: rw.CData, Token: rw.Token, Root: rw.Root, URL: raw.URL,
+		}
+		var wf *frame
+		if len(fs) > 1 {
+			wf = pickTurnstileFrame(fs, origin, clip, rw.Root, used)
+		}
 		if wf != nil {
-			o, ok := origin[wf.ID]
-			if ok {
+			used[wf.ID] = true
+			if o, ok := origin[wf.ID]; ok {
 				w.Widget = &tsRect{X: o.X, Y: o.Y, W: o.W, H: o.H}
 			}
 			c := clip[wf.ID]
 			switch {
 			case c.W > 0 && c.H > 0:
 				w.Mode = "managed"
-			case rootManaged:
+			case rootManaged(rw.Root):
 				// Explicit-render widgets can draw the checkbox in a closed
 				// shadow root with no frame of their own. A visible rendered
 				// root is enough to treat it as managed.
 				w.Mode = "managed"
-				w.Widget = w.Root
+				w.Widget = rw.Root
 			default:
 				w.Mode = "invisible"
 			}
 		}
-	}
-	if w.Mode == "" {
-		if rootManaged {
-			w.Mode = "managed"
-		} else {
-			w.Mode = "invisible"
+		if w.Mode == "" {
+			if rootManaged(rw.Root) {
+				w.Mode = "managed"
+			} else {
+				w.Mode = "invisible"
+			}
 		}
-	}
-	if w.Widget == nil {
-		w.Widget = w.Root
-	}
-	var inner *tsInner
-	if wf != nil {
-		var got tsInner
-		if p.eval(ctx, wf, turnstileWidgetJS, &got) == nil {
-			inner = &got
+		if w.Widget == nil {
+			w.Widget = rw.Root
 		}
+		var inner *tsInner
+		if wf != nil {
+			var got tsInner
+			if p.eval(ctx, wf, turnstileWidgetJS, &got) == nil {
+				inner = &got
+			}
+		}
+		out = append(out, &tsWidgetInfo{w: w, frame: wf, inner: inner})
 	}
-	return &w, wf, inner, nil
+	return out, false, nil
 }
 
-// pickTurnstileFrame prefers the widget's own Cloudflare Turnstile frame,
-// then any child frame drawn inside the widget root (this also covers local
-// test widgets), then any other Cloudflare challenge frame.
-func pickTurnstileFrame(fs []*frame, origin, clip map[cdproto.FrameID]box, root *tsRect) *frame {
+func rootManaged(r *tsRect) bool { return r != nil && r.W >= 100 && r.H >= 30 }
+
+// detectTurnstile keeps the single-widget shape for callers that only need
+// the first widget.
+func (p *Page) detectTurnstile(ctx context.Context) (*tsWidget, *frame, *tsInner, error) {
+	ws, _, err := p.detectTurnstiles(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(ws) == 0 {
+		return &tsWidget{}, nil, nil, nil
+	}
+	return ws[0].w, ws[0].frame, ws[0].inner, nil
+}
+
+// pickTurnstileFrame prefers a child frame drawn inside this widget root
+// (the local and Cloudflare cases), then any unclaimed Cloudflare frame.
+func pickTurnstileFrame(fs []*frame, origin, clip map[cdproto.FrameID]box, root *tsRect, used map[cdproto.FrameID]bool) *frame {
 	var cf, contained *frame
 	for _, f := range fs[1:] {
+		if used != nil && used[f.ID] {
+			continue
+		}
 		o, ok := origin[f.ID]
 		if !ok {
 			continue
-		}
-		if strings.Contains(f.URL, "challenges.cloudflare.com") {
-			if strings.Contains(f.URL, "/turnstile/") {
-				return f
-			}
-			if cf == nil {
-				cf = f
-			}
 		}
 		if root != nil && rectContains(root, o) {
 			c := clip[f.ID]
 			if contained == nil || (c.W > 0 && c.H > 0) {
 				contained = f
 			}
+		}
+		if strings.Contains(f.URL, "challenges.cloudflare.com") && cf == nil {
+			cf = f
 		}
 	}
 	if contained != nil {
@@ -193,13 +265,57 @@ func rectContains(root *tsRect, o box) bool {
 		o.Y+o.H > root.Y-pad && o.Y < root.Y+root.H+pad
 }
 
-// DetectTurnstile reads the page and reports the widget without acting.
+// DetectTurnstile reads the page and reports every widget without acting.
 func (p *Page) DetectTurnstile(ctx context.Context) *turnstile.Status {
-	w, _, inner, err := p.detectTurnstile(ctx)
+	ws, interstitial, err := p.detectTurnstiles(ctx)
 	if err != nil {
 		return &turnstile.Status{State: turnstile.StateUnresolved, Reason: "detection failed: " + err.Error()}
 	}
-	return statusOf(w, inner)
+	if interstitial {
+		return &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Reason: "full-page Cloudflare challenge"}
+	}
+	return statusOfMany(ws)
+}
+
+func statusOfMany(ws []*tsWidgetInfo) *turnstile.Status {
+	st := &turnstile.Status{State: turnstile.StateAbsent}
+	if len(ws) == 0 {
+		return st
+	}
+	st.Detected = true
+	st.Widgets = len(ws)
+	unsolved := 0
+	var first *tsWidgetInfo
+	for _, wi := range ws {
+		if wi.w.Token == "" {
+			unsolved++
+			if first == nil {
+				first = wi
+			}
+		}
+	}
+	st.Unsolved = unsolved
+	if unsolved == 0 {
+		st.State = turnstile.StateSolved
+		first = ws[0]
+	} else {
+		st.State = turnstile.StateUnresolved
+		switch {
+		case len(ws) > 1:
+			st.Reason = fmt.Sprintf("%d of %d widgets unsolved", unsolved, len(ws))
+		case first != nil && first.inner != nil && turnstileWidgetError(first.inner.Text):
+			st.Reason = "widget error: " + clip(first.inner.Text, 120)
+		default:
+			st.Reason = "waiting for token"
+		}
+	}
+	if first != nil {
+		st.Sitekey = first.w.Sitekey
+		st.Action = first.w.Action
+		st.CData = first.w.CData
+		st.Mode = first.w.Mode
+	}
+	return st
 }
 
 func statusOf(w *tsWidget, inner *tsInner) *turnstile.Status {
@@ -393,25 +509,86 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 	ctx, cancel := context.WithTimeout(ctx, total)
 	defer cancel()
 
-	w, wf, inner, err := p.detectTurnstile(ctx)
+	ws, interstitial, err := p.detectTurnstiles(ctx)
 	if err != nil {
 		if errors.Is(err, ErrDialogOpen) {
 			return nil
 		}
 		return &turnstile.Status{State: turnstile.StateUnresolved, Reason: "detection failed: " + err.Error()}
 	}
-	if w == nil || (!w.Present && !w.Interstitial) {
+	if interstitial {
+		return &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Reason: "full-page Cloudflare challenge"}
+	}
+	if len(ws) == 0 {
 		return &turnstile.Status{State: turnstile.StateAbsent}
 	}
-	st := statusOf(w, inner)
-	if w.Interstitial || w.Token != "" {
-		return st
+	initial := statusOfMany(ws)
+	if initial.State == turnstile.StateSolved {
+		return initial
 	}
-
-	key := w.URL + "|" + w.Sitekey
-	if p.tsTries == nil || len(p.tsTries) > 64 {
+	if p.tsTries == nil || len(p.tsTries) > 128 {
 		p.tsTries = map[string]tsAttempt{}
 	}
+
+	var attempts int
+	var solverUsed, visualUsed bool
+	var cost float64
+	var visualMS int64
+	var reasons []string
+	for i, wi := range ws {
+		if wi.w.Token != "" {
+			continue
+		}
+		key := fmt.Sprintf("%s|%s|%d", wi.w.URL, wi.w.Sitekey, i)
+		res := p.resolveWidget(ctx, wi, key, o, inPage, len(ws) == 1)
+		attempts += res.Attempts
+		solverUsed = solverUsed || res.SolverUsed
+		visualUsed = visualUsed || res.VisualUsed
+		visualMS += res.VisualMS
+		cost += res.CostUSD
+		if res.State != turnstile.StateSolved {
+			reasons = append(reasons, res.Reason)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+
+	finalWs, finalInterstitial, derr := p.detectTurnstiles(ctx)
+	if derr != nil || finalInterstitial || len(finalWs) == 0 {
+		final := initial
+		if finalInterstitial {
+			final = &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Reason: "full-page Cloudflare challenge"}
+		} else if len(finalWs) == 0 {
+			final.State = turnstile.StateUnresolved
+			final.Reason = "widgets disappeared after resolution"
+		}
+		final.Attempts, final.SolverUsed, final.VisualUsed, final.VisualMS, final.CostUSD = attempts, solverUsed, visualUsed, visualMS, cost
+		if final.State != turnstile.StateSolved && len(reasons) > 0 {
+			final.Reason = aggregateTurnstileReason(final, reasons[0])
+		}
+		return final
+	}
+	final := statusOfMany(finalWs)
+	final.Attempts, final.SolverUsed, final.VisualUsed, final.VisualMS, final.CostUSD = attempts, solverUsed, visualUsed, visualMS, cost
+	if final.State != turnstile.StateSolved && len(reasons) > 0 {
+		final.Reason = aggregateTurnstileReason(final, reasons[0])
+	}
+	return final
+}
+
+func aggregateTurnstileReason(st *turnstile.Status, reason string) string {
+	if st.Widgets > 1 {
+		return fmt.Sprintf("%d of %d widgets unsolved: %s", st.Unsolved, st.Widgets, reason)
+	}
+	return reason
+}
+
+// resolveWidget runs the attempt bookkeeping, in-page click, opt-in visual
+// phase and solver for one widget.
+func (p *Page) resolveWidget(ctx context.Context, wi *tsWidgetInfo, key string, o turnstileOptions, inPage time.Duration, allowReset bool) *turnstile.Status {
+	w, wf, inner := wi.w, wi.frame, wi.inner
+	st := statusOf(w, inner)
 	a := p.tsTries[key]
 	st.Attempts = a.cycles
 	if a.cycles >= 2 {
@@ -430,19 +607,14 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 	a.last = time.Now()
 	p.tsTries[key] = a
 	st.Attempts = a.cycles
+	st.Reason = ""
 
-	if p.tryTurnstileInPage(ctx, w, wf, inner, inPage) {
+	if p.tryTurnstileInPage(ctx, w, wf, inner, inPage, allowReset) {
 		delete(p.tsTries, key)
-		fresh, _, _, derr := p.detectTurnstile(ctx)
-		if derr != nil {
-			return &turnstile.Status{
-				Detected: true, Sitekey: w.Sitekey, Action: w.Action, CData: w.CData,
-				Mode: w.Mode, State: turnstile.StateSolved, Attempts: a.cycles,
-			}
+		return &turnstile.Status{
+			Detected: true, Sitekey: w.Sitekey, Action: w.Action, CData: w.CData,
+			Mode: w.Mode, State: turnstile.StateSolved, Attempts: a.cycles,
 		}
-		final := statusOf(fresh, nil)
-		final.Attempts = a.cycles
-		return final
 	}
 
 	visualReason := ""
@@ -451,26 +623,17 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 		if vb <= 0 {
 			vb = 8 * time.Second
 		}
-		if vb > total {
-			vb = total
-		}
-		ok, reason, used, cost, ms := p.tryTurnstileVisual(ctx, o.Visual, vb)
+		ok, reason, used, cost, ms := p.tryTurnstileVisual(ctx, o.Visual, vb, w.Index)
 		st.VisualUsed = used
 		st.VisualMS = ms
 		st.CostUSD += cost
 		if ok {
 			delete(p.tsTries, key)
-			fresh, _, _, derr := p.detectTurnstile(ctx)
-			if derr != nil {
-				return &turnstile.Status{
-					Detected: true, Sitekey: w.Sitekey, Action: w.Action, CData: w.CData,
-					Mode: w.Mode, State: turnstile.StateSolved, Attempts: a.cycles,
-					VisualUsed: true, VisualMS: ms, CostUSD: st.CostUSD,
-				}
+			return &turnstile.Status{
+				Detected: true, Sitekey: w.Sitekey, Action: w.Action, CData: w.CData,
+				Mode: w.Mode, State: turnstile.StateSolved, Attempts: a.cycles,
+				VisualUsed: true, VisualMS: ms, CostUSD: st.CostUSD,
 			}
-			final := statusOf(fresh, nil)
-			final.Attempts, final.VisualUsed, final.VisualMS, final.CostUSD = a.cycles, true, ms, st.CostUSD
-			return final
 		}
 		visualReason = reason
 	} else if o.VisualNote != "" {
@@ -502,36 +665,33 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 		}
 		return st
 	}
-	if err := p.injectTurnstileToken(ctx, token); err != nil {
+	if err := p.injectTurnstileTokenAt(ctx, w.Index, token); err != nil {
 		st.State = turnstile.StateUnresolved
 		st.Reason = "token injection failed: " + err.Error()
 		return st
 	}
-	fresh, _, freshInner, derr := p.detectTurnstile(ctx)
-	if derr != nil {
+	if p.turnstileTokenAt(ctx, w.Index) == "" {
 		st.State = turnstile.StateUnresolved
-		st.Reason = "verification failed: " + derr.Error()
+		st.Reason = "solver returned a token but the page did not accept it"
 		return st
 	}
-	final := statusOf(fresh, freshInner)
-	final.Attempts, final.SolverUsed, final.CostUSD = a.cycles, true, st.CostUSD
-	final.VisualUsed, final.VisualMS = st.VisualUsed, st.VisualMS
-	if final.State != turnstile.StateSolved {
-		final.State = turnstile.StateUnresolved
-		final.Reason = "solver returned a token but the page did not accept it"
-		return final
-	}
 	delete(p.tsTries, key)
-	return final
+	return &turnstile.Status{
+		Detected: true, Sitekey: w.Sitekey, Action: w.Action, CData: w.CData,
+		Mode: w.Mode, State: turnstile.StateSolved, Attempts: a.cycles,
+		SolverUsed: true, VisualUsed: st.VisualUsed, VisualMS: st.VisualMS, CostUSD: st.CostUSD,
+	}
 }
 
-const turnstileTokenJS = `(() => {
-  const el = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
-  return el ? String(el.value || '') : '';
-})()`
+func detectWidgetAt(ws []*tsWidgetInfo, i int) *tsWidgetInfo {
+	if i >= 0 && i < len(ws) {
+		return ws[i]
+	}
+	return nil
+}
 
-func (p *Page) turnstileToken(ctx context.Context) string {
-	v, err := p.Eval(ctx, turnstileTokenJS)
+func (p *Page) turnstileTokenAt(ctx context.Context, i int) string {
+	v, err := p.Eval(ctx, turnstileTokenAtJS(i))
 	if err != nil {
 		return ""
 	}
@@ -542,7 +702,7 @@ func (p *Page) turnstileToken(ctx context.Context) string {
 	return s
 }
 
-func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, inner *tsInner, budget time.Duration) bool {
+func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, inner *tsInner, budget time.Duration, allowReset bool) bool {
 	if budget <= 0 {
 		budget = 8 * time.Second
 	}
@@ -557,19 +717,19 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 			}
 		}
 		if w.Widget != nil {
-			p.clickTurnstileWidget(ctx, w.Widget)
+			p.clickTurnstileWidget(ctx, w)
 		}
 	}
 	click()
 	lastDetect := start
 	retried := false
 	for {
-		if p.turnstileToken(ctx) != "" {
+		if p.turnstileTokenAt(ctx, w.Index) != "" {
 			return true
 		}
 		if time.Since(start) > budget {
 			final, fcancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-			ok := p.turnstileToken(final) != ""
+			ok := p.turnstileTokenAt(final, w.Index) != ""
 			fcancel()
 			return ok
 		}
@@ -577,19 +737,19 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 		// up a checkbox that shows up during the wait.
 		if time.Since(lastDetect) > 750*time.Millisecond {
 			lastDetect = time.Now()
-			if cw, cwf, cinner, err := p.detectTurnstile(ctx); err == nil {
-				if cw.Widget != nil {
-					w.Widget = cw.Widget
-				}
-				wf, inner = cwf, cinner
-				if inner != nil && inner.Checkbox != nil && !clickedCheckbox {
-					click()
+			if fresh, _, err := p.detectTurnstiles(ctx); err == nil {
+				if fw := detectWidgetAt(fresh, w.Index); fw != nil {
+					w.Widget, w.Root, w.Mode = fw.w.Widget, fw.w.Root, fw.w.Mode
+					wf, inner = fw.frame, fw.inner
+					if inner != nil && inner.Checkbox != nil && !clickedCheckbox {
+						click()
+					}
 				}
 			}
 		}
 		if !retried && time.Since(start) > 3*time.Second {
 			retried = true
-			if inner != nil && turnstileWidgetError(inner.Text) {
+			if allowReset && inner != nil && turnstileWidgetError(inner.Text) {
 				p.resetTurnstileWidget(ctx)
 			}
 			click()
@@ -602,7 +762,7 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 	}
 }
 
-func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget time.Duration) (bool, string, bool, float64, int64) {
+func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget time.Duration, index int) (bool, string, bool, float64, int64) {
 	if budget <= 0 {
 		budget = 8 * time.Second
 	}
@@ -610,7 +770,7 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 	// even when focus emulation reports it visible.
 	_, _ = cdproto.Call(ctx, p.S, cdppage.BringToFront, cdproto.Empty{})
 	start := time.Now()
-	clip, err := p.turnstileVisualClip(ctx)
+	clip, err := p.turnstileVisualClip(ctx, index)
 	if err != nil {
 		return false, "clip failed: " + err.Error(), false, 0, 0
 	}
@@ -632,7 +792,7 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 	cost, ms := res.CostUSD, res.MS
 	switch res.State {
 	case "verified":
-		if p.turnstileToken(ctx) != "" {
+		if p.turnstileTokenAt(ctx, index) != "" {
 			return true, "", true, cost, ms
 		}
 		return false, "verified but no token", true, cost, ms
@@ -651,7 +811,7 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 	start = time.Now()
 	retried := false
 	for {
-		if p.turnstileToken(ctx) != "" {
+		if p.turnstileTokenAt(ctx, index) != "" {
 			return true, "", true, cost, ms
 		}
 		if time.Since(start) > budget {
@@ -671,7 +831,7 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 
 // turnstileVisualClip frames the widget plus 40 px of context, caps the crop
 // for the image API, and picks a scale inside its 256 to 1568 px window.
-func (p *Page) turnstileVisualClip(ctx context.Context) (Clip, error) {
+func (p *Page) turnstileVisualClip(ctx context.Context, index int) (Clip, error) {
 	fs, err := p.frames(ctx)
 	if err != nil {
 		return Clip{}, err
@@ -679,18 +839,16 @@ func (p *Page) turnstileVisualClip(ctx context.Context) (Clip, error) {
 	if len(fs) == 0 {
 		return Clip{}, errors.New("no frames")
 	}
-	_ = p.eval(ctx, fs[0], `(() => {
-	  const root = document.querySelector('.cf-turnstile') || document.querySelector('[data-sitekey]');
-	  if (root) root.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
-	  return true;
-	})()`, nil)
-	w, _, _, err := p.detectTurnstile(ctx)
+	_ = p.eval(ctx, fs[0], turnstileScrollAtJS(index), nil)
+	fresh, _, err := p.detectTurnstiles(ctx)
 	if err != nil {
 		return Clip{}, err
 	}
-	if w == nil || (!w.Present && !w.Interstitial) {
-		return Clip{}, errors.New("no widget")
+	fw := detectWidgetAt(fresh, index)
+	if fw == nil {
+		return Clip{}, errors.New("widget disappeared")
 	}
+	w := fw.w
 	base := w.Widget
 	if base == nil || base.W <= 0 || base.H <= 0 {
 		base = w.Root
@@ -764,23 +922,22 @@ func (p *Page) clickTurnstileCheckbox(ctx context.Context, wf *frame, cb *tsRect
 	return err
 }
 
-func (p *Page) clickTurnstileWidget(ctx context.Context, r *tsRect) {
+func (p *Page) clickTurnstileWidget(ctx context.Context, w *tsWidget) {
 	fs, err := p.frames(ctx)
 	if err != nil || len(fs) == 0 {
 		return
 	}
-	_ = p.eval(ctx, fs[0], `(() => {
-	  const root = document.querySelector('.cf-turnstile') || document.querySelector('[data-sitekey]');
-	  if (root) root.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
-	  return true;
-	})()`, nil)
-	w, _, _, err := p.detectTurnstile(ctx)
-	if err != nil || w.Widget == nil {
+	_ = p.eval(ctx, fs[0], turnstileScrollAtJS(w.Index), nil)
+	if fresh, _, err := p.detectTurnstiles(ctx); err == nil {
+		if fw := detectWidgetAt(fresh, w.Index); fw != nil {
+			w.Widget = fw.w.Widget
+		}
+	}
+	if w.Widget == nil {
 		return
 	}
-	r = w.Widget
-	x := r.X + math.Min(24, r.W*0.25)
-	y := r.Y + r.H/2
+	x := w.Widget.X + math.Min(24, w.Widget.W*0.25)
+	y := w.Widget.Y + w.Widget.H/2
 	_, _ = p.ClickXY(ctx, x, y, ClickOptions{})
 }
 
@@ -804,23 +961,25 @@ func (p *Page) revealFrameChain(ctx context.Context, f *frame) {
 	}
 }
 
-func (p *Page) injectTurnstileToken(ctx context.Context, token string) error {
-	js := `(() => {
-	  const token = ` + jsString(token) + `;
-	  let el = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+func (p *Page) injectTurnstileTokenAt(ctx context.Context, index int, token string) error {
+	js := fmt.Sprintf(`(() => {
+	  const token = %s;
+	  const top = %s;
+	  const root = top[%d];
+	  const sel = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]';
+	  let el = root ? (root.querySelector(sel) || (top.length === 1 ? document.querySelector(sel) : null)) : document.querySelector(sel);
 	  if (!el) {
-	    const root = document.querySelector('.cf-turnstile') || document.body;
 	    el = document.createElement('input');
 	    el.type = 'hidden';
 	    el.name = 'cf-turnstile-response';
-	    root.appendChild(el);
+	    (root || document.body).appendChild(el);
 	  }
 	  const proto = el.localName === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
 	  Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, token);
 	  el.dispatchEvent(new Event('input', {bubbles:true, composed:true}));
 	  el.dispatchEvent(new Event('change', {bubbles:true}));
 	  return el.value;
-	})()`
+	})()`, jsString(token), turnstileRootsJS, index)
 	v, err := p.Eval(ctx, js)
 	if err != nil {
 		return err

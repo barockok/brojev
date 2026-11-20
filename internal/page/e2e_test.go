@@ -145,6 +145,23 @@ addEventListener('message', (e) => {
   i.value = 'visual-token';
   out.textContent = 'solved';
 });</script>`,
+
+	// Two independent widgets on one page. Each click sets its own token.
+	"/turnstile-multi": `<title>turnstile multi</title>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FD" style="width:300px;height:65px">
+<label style="display:flex;align-items:center;gap:8px;height:100%" onclick="document.getElementById('r1').value='token-1'"><input type=checkbox id=cb1><span>Verify you are human</span></label>
+<input type=hidden name=cf-turnstile-response id=r1>
+</div>
+<div class="cf-turnstile" data-sitekey="1x0000000000000000000000FE" style="width:300px;height:65px;margin-top:20px">
+<label style="display:flex;align-items:center;gap:8px;height:100%" onclick="document.getElementById('r2').value='token-2'"><input type=checkbox id=cb2><span>Verify you are human</span></label>
+<input type=hidden name=cf-turnstile-response id=r2>
+</div><p id=out></p>`,
+
+	// Two real interactive widgets with the same sitekey.
+	"/turnstile-multi-real": `<title>turnstile multi real</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="3x00000000000000000000FF"></div>
+<div class="cf-turnstile" data-sitekey="3x00000000000000000000FF" style="margin-top:20px"></div>`,
 }
 
 type env struct {

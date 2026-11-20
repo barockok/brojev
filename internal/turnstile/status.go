@@ -1,6 +1,8 @@
 // Package turnstile detects and resolves Cloudflare Turnstile challenges.
 package turnstile
 
+import "fmt"
+
 // State is the externally visible state of a Turnstile widget.
 type State string
 
@@ -30,6 +32,8 @@ type Status struct {
 	CData      string  `json:"cdata,omitempty"`
 	Mode       string  `json:"mode,omitempty"`
 	State      State   `json:"state"`
+	Widgets    int     `json:"widgets,omitempty"`
+	Unsolved   int     `json:"unsolved,omitempty"`
 	Attempts   int     `json:"attempts,omitempty"`
 	SolverUsed bool    `json:"solverUsed,omitempty"`
 	VisualUsed bool    `json:"visualUsed,omitempty"`
@@ -51,6 +55,9 @@ func (s *Status) Line() string {
 	default:
 		if s.Reason != "" {
 			return "TURNSTILE: unresolved (" + s.Reason + ")"
+		}
+		if s.Widgets > 1 {
+			return fmt.Sprintf("TURNSTILE: unresolved (%d of %d widgets)", s.Unsolved, s.Widgets)
 		}
 		return "TURNSTILE: unresolved"
 	}
