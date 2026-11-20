@@ -53,10 +53,10 @@ type Outcome struct {
 	// Status: done, blocked (Jev chose BLOCKED or progress stalled),
 	// needs_claude (low confidence / missing value / repeated failures),
 	// budget (step limit), error.
-	Status   string  `json:"status"`
-	Reason   string  `json:"reason,omitempty"`
-	Answer   string  `json:"answer,omitempty"`
-	Verified *bool   `json:"verified,omitempty"`
+	Status   string `json:"status"`
+	Reason   string `json:"reason,omitempty"`
+	Answer   string `json:"answer,omitempty"`
+	Verified *bool  `json:"verified,omitempty"`
 	// Turnstile is the last widget state seen by the loop. A solved widget is
 	// resolved inside brojev; an unresolved one is reported, not retried.
 	Turnstile *turnstile.Status `json:"turnstile,omitempty"`

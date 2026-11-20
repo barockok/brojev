@@ -29,6 +29,12 @@
       "description": "Calls Jev at TypeSafe directly instead of through OpenRouter, about 200 ms faster per step (with provider auto or typesafe). Create one at https://console.typesafe.ai/keys. Leave empty to use OpenRouter.",
       "sensitive": true
     },
+    "capsolver_api_key": {
+      "type": "string",
+      "title": "CapSolver API key (optional)",
+      "description": "Turnstile fallback only: when the in-page attempt fails, brojev sends the page URL, sitekey, action and cdata to CapSolver (about $0.0012 per solve) and injects the returned token. Leave empty to keep resolution in-page only.",
+      "sensitive": true
+    },
     "jev_provider": {
       "type": "string",
       "title": "Jev provider",

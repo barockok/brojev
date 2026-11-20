@@ -67,9 +67,9 @@ Sources, in order of preference:
 
 - Widget root: `div.cf-turnstile`, `[data-sitekey]`.
 - `sitekey`, `action`, `cdata`: `data-sitekey`, `data-action`, `data-cdata` attributes on the widget root.
-- Widget frame: `iframe[src^="https://challenges.cloudflare.com/"]` inside or adjacent to the root.
+- Widget frame: the child frame drawn inside the widget root, found through the CDP frame tree and its box. The iframe can live in a shadow root, so `document.querySelector('iframe')` is not reliable. A Cloudflare `challenges.cloudflare.com/turnstile/` frame is used when present.
 - Response value: `input[name="cf-turnstile-response"]`, then `textarea[name="cf-turnstile-response"]`, then any `[name="cf-turnstile-response"]`.
-- Mode: `managed` when an interactive widget frame is visible, `invisible` when the root exists with no visible frame, `unknown` otherwise.
+- Mode: `managed` when the widget frame is visible, `invisible` when the widget exists without a visible frame, `unknown` otherwise.
 - Error: visible widget error text, for example "Verification failed", or a Turnstile error code when one is detectable.
 
 A full-page Cloudflare interstitial (title "Just a moment...", `#challenge-stage`, or a challenge URL pattern) is classified as `interstitial` and is never sent to the Turnstile solver.
@@ -113,8 +113,10 @@ Runs only when `CAPSOLVER_API_KEY` is set, the state is not `solved`, and a site
     "type": "AntiTurnstileTaskProxyLess",
     "websiteURL": "<page URL>",
     "websiteKey": "<sitekey>",
-    "action": "<optional>",
-    "cdata": "<optional>"
+    "metadata": {
+      "action": "<optional>",
+      "cdata": "<optional>"
+    }
   }
 }
 ```
@@ -184,8 +186,9 @@ E2E tests, gated by `BROJEV_E2E=1`:
   - `1x00000000000000000000AA`: always passes.
   - `2x00000000000000000000AB`: always blocks.
   - `3x00000000000000000000FF`: forces an interactive challenge.
-- Cases: detection reports present, sitekey and mode; `1x` reaches `solved` without a click; `3x` exercises the click path; `2x` ends `unresolved` with a reason and does not loop; token injection through a fake solver sets the response input and moves the state to `solved`.
-- The fixture needs `challenges.cloudflare.com`; skip with a clear message if it is unreachable.
+- Cases: detection reports present, sitekey and mode; `1x` reaches `solved` without a click; `2x` exercises the failure status and the solver injection path; a local widget fixture exercises the click path end to end.
+- Cloudflare's `3x` key can stay in its "Checking your Browser..." state under remote-debugging Chrome, so the click path is tested with a local widget (a cross-site iframe with a real checkbox and a parent that fills the response input) instead of relying on `3x`.
+- The fixtures need `challenges.cloudflare.com`; skip with a clear message if it is unreachable.
 - Existing page, agent, MCP and browser suites must stay green.
 
 Manual check: run a real Turnstile page in the brojev Chrome window with and without `CAPSOLVER_API_KEY`.

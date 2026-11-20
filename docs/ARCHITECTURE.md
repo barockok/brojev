@@ -51,7 +51,7 @@ Claude uses these when `brojev_run` returns `needs_claude`/`blocked`, then may c
 - Canvas / non-DOM UI: screenshot + coordinates via Tier 2.
 
 ## Things CDP cannot do -> handled by
-Native select/date/color popups: set value via JS. OS file pickers (`showOpenFilePicker`): override function. Permission bubbles: pre-grant. Browser chrome shortcuts: Target domain. Captchas: hand to the human, no solver services. Full list in the matrix doc.
+Native select/date/color popups: set value via JS. OS file pickers (`showOpenFilePicker`): override function. Permission bubbles: pre-grant. Browser chrome shortcuts: Target domain. Cloudflare Turnstile: detected and resolved automatically (real input in the widget frame, CapSolver fallback with a key); full-page interstitials and other captchas go to the human. Full list in the matrix doc.
 
 ## Verification
 - Fixture suite (local pages, offline): forms, shadow DOM, same-site + cross-site iframes, popups, all dialog types, uploads, downloads, drag-and-drop, hover menus, nested scroll, contenteditable, canvas, mac shortcuts. Each runs through Tier 2 and, where expressible, Tier 1.
