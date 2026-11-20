@@ -115,3 +115,14 @@ func TestTurnstileNoSolverIsReported(t *testing.T) {
 		t.Fatalf("reason = %q", st.Reason)
 	}
 }
+
+func TestTurnstileSnapshotLine(t *testing.T) {
+	p, ctx := open(t, "/turnstile-block")
+	waitWidget(t, p, ctx)
+	st := p.DetectTurnstile(ctx)
+	s := snap(t, p, ctx)
+	s.Turnstile = st
+	if !strings.Contains(s.String(), "TURNSTILE: unresolved") {
+		t.Fatalf("snapshot:\n%s", s)
+	}
+}
