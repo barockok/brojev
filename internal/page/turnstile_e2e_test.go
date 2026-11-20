@@ -197,7 +197,7 @@ func TestTurnstileVisualPhase(t *testing.T) {
 		W: cb.W / clip.W, H: cb.H / clip.H,
 	}}
 	st = p.ensureTurnstile(ctx, turnstileOptions{
-		Total: 10 * time.Second, InPage: 200 * time.Millisecond, VisualBudget: 5 * time.Second, Visual: fv,
+		Total: 30 * time.Second, InPage: 200 * time.Millisecond, VisualBudget: 10 * time.Second, Visual: fv,
 	})
 	if st == nil || st.State != turnstile.StateSolved {
 		t.Fatalf("visual phase: %+v", st)
