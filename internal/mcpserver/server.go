@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/barockok/brojev/internal/daemon"
+	"github.com/barockok/brojev/internal/turnstile"
 )
 
 // Run serves MCP on stdin/stdout until the client disconnects.
@@ -197,7 +198,8 @@ func renderAction(method string, raw json.RawMessage) string {
 			URL      string `json:"url"`
 			Title    string `json:"title"`
 		} `json:"newTabs"`
-		Snapshot string `json:"snapshot"`
+		Snapshot  string            `json:"snapshot"`
+		Turnstile *turnstile.Status `json:"turnstile"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return string(raw)
@@ -216,6 +218,9 @@ func renderAction(method string, raw json.RawMessage) string {
 	}
 	if r.Note != "" {
 		fmt.Fprintf(&b, "note: %s\n", r.Note)
+	}
+	if l := r.Turnstile.Line(); l != "" {
+		b.WriteString(l + "\n")
 	}
 	if r.Snapshot != "" {
 		b.WriteString(r.Snapshot)
