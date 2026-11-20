@@ -111,10 +111,33 @@ func (c Choice) MarshalJSON() ([]byte, error) {
 	}{"choice", alias(c)})
 }
 
+// Question is the generic form: choice, box or noul.
+type Question struct {
+	Type         string         `json:"type"`
+	Instructions any            `json:"instructions"`
+	Criteria     map[string]any `json:"criteria,omitempty"`
+}
+
+// Asset is an image attached to the request state.
+type Asset struct {
+	Type       string `json:"type"`
+	Format     string `json:"format"`
+	DataBase64 string `json:"data_base64"`
+}
+
+// Box is a box answer in normalized image coordinates (0..1).
+type Box struct {
+	Top    float64 `json:"top"`
+	Bottom float64 `json:"bottom"`
+	Left   float64 `json:"left"`
+	Right  float64 `json:"right"`
+}
+
 type Request struct {
-	Model     string            `json:"model"`
-	State     any               `json:"state"`
-	Questions map[string]Choice `json:"questions"`
+	Model     string              `json:"model"`
+	State     any                 `json:"state"`
+	Assets    map[string]Asset    `json:"assets,omitempty"`
+	Questions map[string]Question `json:"questions"`
 }
 
 type Answer struct {
@@ -122,6 +145,8 @@ type Answer struct {
 	Choice        string             `json:"choice"`
 	Probabilities map[string]float64 `json:"probabilities"`
 	Confidence    float64            `json:"confidence"`
+	Noul          float64            `json:"noul,omitempty"`
+	Box           *Box               `json:"box,omitempty"`
 }
 
 type Usage struct {
@@ -138,7 +163,22 @@ type Response struct {
 
 // Ask sends all questions in one request; they run in parallel server-side.
 func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Response, error) {
-	body, err := json.Marshal(Request{Model: c.Model, State: state, Questions: qs})
+	questions := make(map[string]Question, len(qs))
+	for id, q := range qs {
+		questions[id] = Question{Type: "choice", Instructions: q.Instructions, Criteria: q.Criteria}
+	}
+	return c.ask(ctx, state, nil, questions)
+}
+
+// AskQuestions sends typed questions (choice, box, noul) and optional image
+// assets. Assets need the image-capable API route and are sent only for
+// callers that explicitly opt in.
+func (c *Client) AskQuestions(ctx context.Context, state any, assets map[string]Asset, qs map[string]Question) (*Response, error) {
+	return c.ask(ctx, state, assets, qs)
+}
+
+func (c *Client) ask(ctx context.Context, state any, assets map[string]Asset, qs map[string]Question) (*Response, error) {
+	body, err := json.Marshal(Request{Model: c.Model, State: state, Assets: assets, Questions: qs})
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +190,9 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Choice) (*Res
 		}
 		req.Header.Set("Authorization", "Bearer "+c.Key)
 		req.Header.Set("Content-Type", "application/json")
+		if len(assets) > 0 {
+			req.Header.Set("TypeSafe-Danger-Zone-Images", "true")
+		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("jev: request failed; no action executed: %w", err)
