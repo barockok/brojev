@@ -143,6 +143,34 @@ func Active(home string) (Profile, error) {
 	return p, nil
 }
 
+// Resolve returns the profile a session asked for by name; an empty name is
+// the active one. A daemon started with $BROJEV_PROFILE drives that single
+// ad hoc profile, so nothing can be chosen by name there.
+func Resolve(home, name string) (Profile, error) {
+	if name == "" {
+		return Active(home)
+	}
+	if os.Getenv("BROJEV_PROFILE") != "" {
+		return Profile{}, fmt.Errorf("profile %q: BROJEV_PROFILE is set in the daemon environment, so it drives that one profile only", name)
+	}
+	c, err := Load(home)
+	if err != nil {
+		return Profile{}, err
+	}
+	p, ok := c.Get(home, name)
+	if !ok {
+		var names []string
+		for _, k := range c.All(home) {
+			names = append(names, k.Name)
+		}
+		return Profile{}, fmt.Errorf("no profile %q (known: %s); add it with the profile tool", name, strings.Join(names, ", "))
+	}
+	if os.Getenv("BROJEV_ATTACH") == "1" {
+		p.Attach = true
+	}
+	return p, nil
+}
+
 // Add creates or updates a named profile. An empty dir means a new
 // dedicated data dir at <home>/profiles/<name>.
 func (c *Config) Add(home string, p Profile) (Profile, error) {

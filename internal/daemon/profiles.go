@@ -17,14 +17,15 @@ type ProfileParams struct {
 	Dir           string `json:"dir,omitempty"`
 	ChromeProfile string `json:"chromeProfile,omitempty"`
 	Attach        bool   `json:"attach,omitempty"`
-	Quit          bool   `json:"quit,omitempty"`  // on use: also close the previous profile's Chrome
-	Force         bool   `json:"force,omitempty"` // on use: switch even while other sessions are using the browser
+	Quit          bool   `json:"quit,omitempty"`  // on use: also close the previous default profile's Chrome
+	Force         bool   `json:"force,omitempty"` // on use with quit: close it even while other sessions work there
 }
 
 type ProfileInfo struct {
 	profile.Profile
-	Active    bool `json:"active,omitempty"`
+	Active    bool `json:"active,omitempty"` // the default of sessions that name no profile
 	Connected bool `json:"connected,omitempty"`
+	Sessions  int  `json:"sessions,omitempty"` // named sessions working on it
 	Exists    bool `json:"exists"`
 }
 
@@ -48,11 +49,13 @@ func (s *Server) profileTool(ctx context.Context, req Request) (any, error) {
 		if base := CDPURL(); base != "" {
 			return map[string]any{"name": "external", "cdpUrl": chrome.RedactURL(base), "note": errExternalChrome.Error()}, nil
 		}
-		p, err := ActiveProfile()
+		// With a name (a pinned client sends its pin): that profile.
+		p, err := profile.Resolve(home, a.Name)
 		if err != nil {
 			return nil, err
 		}
-		return s.info(p, p), nil
+		active, _ := ActiveProfile()
+		return s.info(p, active), nil
 	case "chrome-profiles":
 		dir := a.Dir
 		if dir == "" && a.Name != "" {
@@ -78,7 +81,7 @@ func (s *Server) profileTool(ctx context.Context, req Request) (any, error) {
 		if err := cfg.Save(home); err != nil {
 			return nil, err
 		}
-		return map[string]any{"added": p, "note": "switch to it with: profile use " + p.Name}, nil
+		return map[string]any{"added": p, "note": "use it by passing profile=" + p.Name + " on a call, or make it the default with: profile use " + p.Name}, nil
 	case "remove":
 		if err := cfg.Remove(a.Name); err != nil {
 			return nil, err
@@ -98,26 +101,33 @@ func (s *Server) profileTool(ctx context.Context, req Request) (any, error) {
 		if !ok {
 			return nil, fmt.Errorf("no profile %q; add it first", a.Name)
 		}
-		if cur, err := ActiveProfile(); err == nil && cur != next && !a.Force {
-			// Switching drops the browser connection and every session's tabs.
-			if others := s.otherLiveBases(req.Session); len(others) > 0 {
-				return nil, fmt.Errorf("profile use: %d other brojev session(s) are using the browser and would lose their tabs; "+
-					"ask them to finish, or pass force=true to switch anyway", len(others))
+		// The default only decides where sessions that name no profile start:
+		// every profile keeps its own Chrome, and running sessions stay put.
+		var quit *link
+		if prev, err := ActiveProfile(); a.Quit && err == nil && linkKey(prev) != linkKey(next) {
+			s.mu.Lock()
+			if ln := s.links[linkKey(prev)]; ln != nil && ln.b != nil {
+				if n := s.linkSessionsLocked(ln, req.Session); n > 0 && !a.Force {
+					s.mu.Unlock()
+					return nil, fmt.Errorf("profile use: %d other brojev session(s) are working on profile %q and would lose their tabs; "+
+						"drop quit to leave its Chrome running, or pass force=true to close it anyway", n, prev.Name)
+				}
+				quit = ln
 			}
+			s.mu.Unlock()
 		}
 		cfg.Active = a.Name
 		if err := cfg.Save(home); err != nil {
 			return nil, err
 		}
-		s.mu.Lock()
-		prev := s.prof
-		if s.browser != nil && prev != next {
-			if a.Quit {
-				_ = s.browser.Conn().Browser().Call(ctx, "Browser.close", nil, nil)
+		if quit != nil {
+			s.mu.Lock()
+			if quit.b != nil {
+				_ = quit.b.Conn().Browser().Call(ctx, "Browser.close", nil, nil)
 			}
-			s.dropLocked()
+			s.dropLocked(quit)
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 		out := map[string]any{"active": next}
 		if os.Getenv("BROJEV_PROFILE") != "" {
 			out["warning"] = "BROJEV_PROFILE is set in the daemon environment and overrides the active profile"
@@ -125,7 +135,7 @@ func (s *Server) profileTool(ctx context.Context, req Request) (any, error) {
 		if next.Attach {
 			out["note"] = "attach mode: on first use, enable chrome://inspect/#remote-debugging in that Chrome and click Allow"
 		} else {
-			out["note"] = "the next browser action launches or reconnects Chrome on this profile"
+			out["note"] = "sessions that name no profile now use it; sessions already running stay on their profile"
 		}
 		return out, nil
 	}
@@ -149,8 +159,28 @@ func (s *Server) profileList(cfg *profile.Config) (any, error) {
 
 func (s *Server) info(p, active profile.Profile) ProfileInfo {
 	s.mu.Lock()
-	connected := s.browser != nil && s.prof.Dir == p.Dir && s.prof.ChromeProfile == p.ChromeProfile
+	ln := s.links[linkKey(p)]
+	connected := ln != nil && ln.b != nil && ln.prof.ChromeProfile == p.ChromeProfile
+	n := 0
+	for _, sess := range s.sessions {
+		if !sess.isDefault() && sess.prof.Name == p.Name {
+			n++
+		}
+	}
 	s.mu.Unlock()
 	_, err := os.Stat(p.Dir)
-	return ProfileInfo{Profile: p, Active: p.Name == active.Name, Connected: connected, Exists: err == nil}
+	return ProfileInfo{Profile: p, Active: p.Name == active.Name, Connected: connected, Sessions: n, Exists: err == nil}
+}
+
+// liveBrowsers lists the profiles with a live Chrome connection.
+func (s *Server) liveBrowsers() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []map[string]any
+	for _, ln := range s.links {
+		if ln.b != nil {
+			out = append(out, map[string]any{"profile": ln.prof.Name, "dir": ln.prof.Dir, "sessions": s.linkSessionsLocked(ln, "")})
+		}
+	}
+	return out
 }

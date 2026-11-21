@@ -83,9 +83,9 @@ var pageTools = map[string]bool{
 func (s *Server) current(ctx context.Context, b *browser.Browser, sess *session) (*page.Page, error) {
 	s.mu.Lock()
 	cur := sess.cur
-	p := s.pages[cur]
+	p := sess.ln.pages[cur]
 	s.mu.Unlock()
-	attached := s.keepTabs()
+	attached := s.keepTabs(sess.ln)
 	pages, err := s.sessionPages(ctx, b, sess)
 	if err != nil {
 		return nil, err
@@ -146,8 +146,9 @@ func (s *Server) use(ctx context.Context, b *browser.Browser, sess *session, id 
 	if b.IsGuard(id) {
 		return nil, browser.ErrGuardTab
 	}
+	ln := sess.ln
 	s.mu.Lock()
-	if p := s.pages[id]; p != nil {
+	if p := ln.pages[id]; p != nil {
 		changed := sess.cur != id
 		sess.cur = id
 		s.mu.Unlock()
@@ -166,14 +167,11 @@ func (s *Server) use(ctx context.Context, b *browser.Browser, sess *session, id 
 		return nil, err
 	}
 	s.mu.Lock()
-	if s.pages == nil {
-		s.pages = map[target.ID]*page.Page{}
-	}
-	if prev := s.pages[id]; prev != nil {
+	if prev := ln.pages[id]; prev != nil {
 		p.Close()
 		p = prev
 	} else {
-		s.pages[id] = p
+		ln.pages[id] = p
 	}
 	sess.cur = id
 	s.mu.Unlock()
@@ -244,31 +242,32 @@ func (s *Server) pageTool(ctx context.Context, b *browser.Browser, sess *session
 		if b.IsGuard(id) {
 			return nil, browser.ErrGuardTab
 		}
-		attached := s.keepTabs()
+		ln := sess.ln
+		attached := s.keepTabs(ln)
 		if !s.canTouch(sess, id, a.Shared) {
 			return nil, errNotYours
 		}
 		if attached {
 			// The user's own Chrome: never close a tab another session opened.
 			s.mu.Lock()
-			o := s.owner[id]
+			o := ln.owner[id]
 			s.mu.Unlock()
-			if o != "" && o != sess.id {
+			if o != "" && o != sess.key {
 				return nil, errors.New("tab_close: in attach mode a session only closes tabs it opened itself")
 			}
 		}
 		s.mu.Lock()
-		if p := s.pages[id]; p != nil {
+		if p := ln.pages[id]; p != nil {
 			p.Close()
-			delete(s.pages, id)
+			delete(ln.pages, id)
 		}
 		for _, o := range s.sessions {
-			if o.cur == id {
+			if o.ln == ln && o.cur == id {
 				o.cur = ""
 			}
 		}
 		s.mu.Unlock()
-		s.unclaim(id)
+		s.unclaim(ln, id)
 		if err := b.CloseTab(ctx, id); err != nil {
 			return nil, err
 		}

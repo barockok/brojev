@@ -1,6 +1,7 @@
-// Package daemon runs brojevd: it owns the single CDP connection (so Chrome
-// asks for remote-debugging approval at most once) and serves short-lived
-// clients (MCP server, CLI) over a unix socket with newline-delimited JSON.
+// Package daemon runs brojevd: it owns one CDP connection per Chrome profile
+// in use (so Chrome asks for remote-debugging approval at most once) and
+// serves short-lived clients (MCP server, CLI) over a unix socket with
+// newline-delimited JSON.
 package daemon
 
 import (
@@ -71,12 +72,8 @@ type Server struct {
 	Headless bool
 
 	mu       sync.Mutex
-	browser  *browser.Browser
-	prof     profile.Profile // profile of the live connection
-	connMu   sync.Mutex      // serialises (re)connecting, which can take minutes in attach mode
-	pages    map[target.ID]*page.Page
+	links    map[string]*link // data dir -> the Chrome of the profiles on it
 	sessions map[string]*session
-	owner    map[target.ID]string // tab -> owning named session
 	leases   map[string]int       // session base -> open lease connections
 	pending  map[string]*time.Timer
 	jev      *jev.Client
@@ -179,44 +176,107 @@ func CDPURL() string { return os.Getenv("BROJEV_CDP_URL") }
 
 var errExternalChrome = errors.New("BROJEV_CDP_URL is set: brojev does not manage this Chrome")
 
-// keepTabs reports whether the Chrome is not ours to tidy: the user's real
-// Chrome (attach mode) or an external one. Sessions never close tabs there
-// on exit, and only close tabs they opened.
-func (s *Server) keepTabs() bool {
-	if CDPURL() != "" {
-		return true
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.prof.Attach
+// link is the connection to the Chrome of one profile data dir. Chrome runs
+// one instance per data dir, so profiles that share a dir share a link.
+type link struct {
+	key    string
+	connMu sync.Mutex // serialises (re)connecting, which can take minutes in attach mode
+
+	// guarded by Server.mu
+	prof  profile.Profile // profile of the connection
+	b     *browser.Browser
+	pages map[target.ID]*page.Page
+	owner map[target.ID]string // tab -> key of the owning named session
 }
 
-// conn returns the live browser, (re)connecting and launching Chrome if needed.
-func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
+// keepLocked reports whether the Chrome is not ours to tidy: the user's real
+// Chrome (attach mode) or an external one. Sessions never close tabs there
+// on exit, and only close tabs they opened.
+func (ln *link) keepLocked() bool { return CDPURL() != "" || ln.prof.Attach }
+
+func (s *Server) keepTabs(ln *link) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ln.keepLocked()
+}
+
+// resolveProfile returns the profile a call asked for by name (empty: the
+// active one). An external Chrome is the only browser there is.
+func resolveProfile(name string) (profile.Profile, error) {
+	if base := CDPURL(); base != "" {
+		if name != "" && name != "external" {
+			return profile.Profile{}, fmt.Errorf("profile %q: %w", name, errExternalChrome)
+		}
+		return profile.Profile{Name: "external", Dir: chrome.RedactURL(base)}, nil
+	}
+	return profile.Resolve(Home(), name)
+}
+
+func linkKey(p profile.Profile) string {
+	if CDPURL() != "" {
+		return "external"
+	}
+	return filepath.Clean(p.Dir)
+}
+
+// linkForLocked returns the link of prof's data dir, creating it. A data dir
+// that is open as another Chrome profile (person) is switched only while no
+// session works there.
+func (s *Server) linkForLocked(prof profile.Profile) (*link, error) {
+	if s.links == nil {
+		s.links = map[string]*link{}
+	}
+	key := linkKey(prof)
+	ln := s.links[key]
+	if ln == nil {
+		ln = &link{key: key, prof: prof, pages: map[target.ID]*page.Page{}, owner: map[target.ID]string{}}
+		s.links[key] = ln
+		return ln, nil
+	}
+	if ln.prof.ChromeProfile == prof.ChromeProfile && ln.prof.Attach == prof.Attach {
+		return ln, nil
+	}
+	if n := s.linkSessionsLocked(ln, ""); n > 0 {
+		return nil, fmt.Errorf("profile %q shares the Chrome data dir %s with profile %q, which %d session(s) are using; a data dir runs one Chrome profile at a time",
+			prof.Name, prof.Dir, ln.prof.Name, n)
+	}
+	log.Printf("profile changed %s -> %s; reconnecting", ln.prof.Name, prof.Name)
+	s.dropLocked(ln)
+	ln.prof = prof
+	return ln, nil
+}
+
+// linkSessionsLocked counts the named sessions on ln, not counting those of
+// the lease holder except.
+func (s *Server) linkSessionsLocked(ln *link, except string) int {
+	n := 0
+	for _, sess := range s.sessions {
+		if sess.ln == ln && !sess.isDefault() && (except == "" || sess.base != except) {
+			n++
+		}
+	}
+	return n
+}
+
+// conn returns the live browser of ln, (re)connecting and launching Chrome if needed.
+func (s *Server) conn(ctx context.Context, ln *link) (*browser.Browser, error) {
+	ln.connMu.Lock()
+	defer ln.connMu.Unlock()
 	if base := CDPURL(); base != "" {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.connExternalLocked(ctx, base)
-	}
-	prof, err := ActiveProfile()
-	if err != nil {
-		return nil, err
+		return s.connExternalLocked(ctx, ln, base)
 	}
 	s.mu.Lock()
-	if s.browser != nil {
+	prof := ln.prof
+	if ln.b != nil {
 		select {
-		case <-s.browser.Done():
-			s.dropLocked() // Chrome quit or the socket dropped
+		case <-ln.b.Done():
+			s.dropLocked(ln) // Chrome quit or the socket dropped
 		default:
-			if prof == s.prof {
-				b := s.browser
-				s.mu.Unlock()
-				return b, nil
-			}
-			log.Printf("profile changed %s -> %s; reconnecting", s.prof.Name, prof.Name)
-			s.dropLocked()
+			b := ln.b
+			s.mu.Unlock()
+			return b, nil
 		}
 	}
 	s.mu.Unlock()
@@ -242,9 +302,8 @@ func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 		log.Printf("downloads: %v", err)
 	}
 	s.mu.Lock()
-	s.prof = prof
-	s.pages = map[target.ID]*page.Page{}
-	s.browser = b
+	ln.pages = map[target.ID]*page.Page{}
+	ln.b = b
 	s.mu.Unlock()
 	return b, nil
 }
@@ -252,14 +311,14 @@ func (s *Server) conn(ctx context.Context) (*browser.Browser, error) {
 // connExternalLocked attaches to the Chrome at base, resolving its endpoint
 // again on every reconnect (a restarted Chrome gets a new browser id), and
 // keeps its guard tab open on every call (see browser.EnsureGuard).
-func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.Browser, error) {
-	if s.browser != nil {
+func (s *Server) connExternalLocked(ctx context.Context, ln *link, base string) (*browser.Browser, error) {
+	if ln.b != nil {
 		select {
-		case <-s.browser.Done():
-			s.dropLocked() // Chrome restarted or the socket dropped
+		case <-ln.b.Done():
+			s.dropLocked(ln) // Chrome restarted or the socket dropped
 		default:
-			s.ensureGuardLocked(ctx, s.browser)
-			return s.browser, nil
+			s.ensureGuardLocked(ctx, ln)
+			return ln.b, nil
 		}
 	}
 	ep, err := chrome.EndpointFromURL(ctx, base)
@@ -271,54 +330,54 @@ func (s *Server) connExternalLocked(ctx context.Context, base string) (*browser.
 		return nil, err
 	}
 	log.Printf("attached to %s (external Chrome)", chrome.RedactURL(base))
-	s.prof = profile.Profile{Name: "external", Dir: chrome.RedactURL(base)}
 	dl := filepath.Join(Home(), "downloads")
 	if err := b.EnableDownloads(ctx, dl); err != nil {
 		log.Printf("downloads: %v", err)
 	} else {
 		log.Printf("downloads: set the external Chrome's download dir to %s", dl)
 	}
-	s.pages = map[target.ID]*page.Page{}
-	s.browser = b
-	s.ensureGuardLocked(ctx, b)
+	ln.pages = map[target.ID]*page.Page{}
+	ln.b = b
+	s.ensureGuardLocked(ctx, ln)
 	return b, nil
 }
 
 // ensureGuardLocked keeps the guard tab and makes sure the daemon never
 // drives it. A failure is logged, not returned: the call itself may still work.
-func (s *Server) ensureGuardLocked(ctx context.Context, b *browser.Browser) {
-	if err := b.EnsureGuard(ctx); err != nil {
+func (s *Server) ensureGuardLocked(ctx context.Context, ln *link) {
+	if err := ln.b.EnsureGuard(ctx); err != nil {
 		log.Printf("guard tab: %v", err)
 		return
 	}
-	g := b.Guard()
-	if p := s.pages[g]; p != nil {
+	g := ln.b.Guard()
+	if p := ln.pages[g]; p != nil {
 		p.Close()
-		delete(s.pages, g)
+		delete(ln.pages, g)
 	}
 	for _, sess := range s.sessions {
-		if sess.cur == g {
+		if sess.ln == ln && sess.cur == g {
 			sess.cur = ""
 		}
 	}
 }
 
-// dropLocked forgets the live connection (Chrome itself keeps running) and
-// every session's tabs, which died with it.
-func (s *Server) dropLocked() {
-	for _, p := range s.pages {
+// dropLocked forgets the live connection of ln (Chrome itself keeps running)
+// and the tabs of every session on it, which died with it.
+func (s *Server) dropLocked(ln *link) {
+	for _, p := range ln.pages {
 		p.Close()
 	}
-	s.pages = map[target.ID]*page.Page{}
-	s.owner = map[target.ID]string{}
+	ln.pages = map[target.ID]*page.Page{}
+	ln.owner = map[target.ID]string{}
 	for _, sess := range s.sessions {
-		sess.cur, sess.owned = "", map[target.ID]bool{}
+		if sess.ln == ln {
+			sess.cur, sess.owned = "", map[target.ID]bool{}
+		}
 	}
-	if s.browser != nil {
-		s.browser.Close()
-		s.browser = nil
+	if ln.b != nil {
+		ln.b.Close()
+		ln.b = nil
 	}
-	s.prof = profile.Profile{}
 }
 
 func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
@@ -334,13 +393,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		return map[string]bool{"ok": true}, nil
 	}
 
-	b, err := s.conn(ctx)
-	if err != nil {
-		return nil, err
-	}
 	if req.Method == "run" || pageTools[req.Method] {
-		id, base := resolveSession(req.Session, req.Params)
-		sess, err := s.sessionFor(id, base)
+		sess, err := s.sessionFor(resolveSession(req.Session, req.Params))
 		if err != nil {
 			return nil, err
 		}
@@ -349,10 +403,30 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 			return nil, err
 		}
 		defer done()
+		b, err := s.conn(ctx, sess.ln)
+		if err != nil {
+			return nil, err
+		}
 		if req.Method == "run" {
 			return s.run(ctx, b, sess, req.Params)
 		}
 		return s.pageTool(ctx, b, sess, req.Method, req.Params)
+	}
+
+	// Browser-level calls (CLI): the Chrome of the asked or the active profile.
+	prof, err := resolveProfile(resolveSession(req.Session, req.Params).profile)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	ln, err := s.linkForLocked(prof)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	b, err := s.conn(ctx, ln)
+	if err != nil {
+		return nil, err
 	}
 	switch req.Method {
 	case "status":
@@ -366,8 +440,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		}
 		out := map[string]any{
 			"product": v.Product, "protocol": v.ProtocolVersion, "endpoint": b.Endpoint,
-			"profile": s.prof.Name, "profileDir": s.prof.Dir, "chromeProfile": s.prof.ChromeProfile, "attach": s.prof.Attach,
-			"tabs": len(pages), "pid": os.Getpid(), "sessions": s.sessionCount(),
+			"profile": prof.Name, "profileDir": prof.Dir, "chromeProfile": prof.ChromeProfile, "attach": prof.Attach,
+			"tabs": len(pages), "pid": os.Getpid(), "sessions": s.sessionCount(), "browsers": s.liveBrowsers(),
 		}
 		if g := b.Guard(); g != "" {
 			out["guardTab"] = g
