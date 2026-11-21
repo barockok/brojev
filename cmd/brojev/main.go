@@ -101,7 +101,8 @@ func usage() {
   scroll [ref] [dy] | drag <from> <to> | upload <ref> <file>... | dialog accept|dismiss [text]
   wait <text> | eval <js> | tabs | tab_new [url] | tab_switch <id> | tab_close [id] | downloads
   emulate <device>|reset | grant <permission>... | state_save [path] | state_load [path]
-  any tool also takes one JSON argument: brojev click '{"x":10,"y":20}'`)
+  any tool also takes one JSON argument: brojev click '{"x":10,"y":20}'
+  "profile" in that JSON runs the call on another profile: brojev navigate '{"url":"...","profile":"work"}'`)
 	os.Exit(2)
 }
 

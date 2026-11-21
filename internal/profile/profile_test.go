@@ -91,3 +91,38 @@ func TestEnvOverride(t *testing.T) {
 		t.Fatalf("env override: %+v %v", p, err)
 	}
 }
+
+func TestResolve(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("BROJEV_PROFILE", "")
+	t.Setenv("BROJEV_ATTACH", "")
+	c, _ := Load(home)
+	if _, err := c.Add(home, Profile{Name: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Save(home); err != nil {
+		t.Fatal(err)
+	}
+
+	// No name: the active profile.
+	if p, err := Resolve(home, ""); err != nil || p.Name != "default" {
+		t.Fatalf("resolve default: %+v %v", p, err)
+	}
+	// A name picks that profile whatever is active.
+	if p, err := Resolve(home, "work"); err != nil || p.Name != "work" || p.Dir != filepath.Join(home, "profiles", "work") {
+		t.Fatalf("resolve work: %+v %v", p, err)
+	}
+	// Unknown names list what exists.
+	_, err := Resolve(home, "nope")
+	if err == nil || !strings.Contains(err.Error(), "work") || !strings.Contains(err.Error(), "default") {
+		t.Fatalf("resolve unknown: %v", err)
+	}
+	// An ad hoc daemon-wide profile leaves nothing to choose.
+	t.Setenv("BROJEV_PROFILE", filepath.Join(home, "adhoc"))
+	if p, err := Resolve(home, ""); err != nil || p.Name != "env:BROJEV_PROFILE" {
+		t.Fatalf("resolve env: %+v %v", p, err)
+	}
+	if _, err := Resolve(home, "work"); err == nil || !strings.Contains(err.Error(), "BROJEV_PROFILE") {
+		t.Fatalf("resolve by name under BROJEV_PROFILE: %v", err)
+	}
+}

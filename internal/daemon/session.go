@@ -15,23 +15,29 @@ import (
 	"github.com/chromedp/cdproto/target"
 
 	"github.com/barockok/brojev/internal/browser"
+	"github.com/barockok/brojev/internal/profile"
 )
 
-// Several Claude sessions (and subagents) share one brojevd and one Chrome.
-// Each gets a session: its own current tab, its own tabs (each in a window of
-// its own, so no two sessions fight over the foreground tab) and its own
-// action queue. Requests without a session id belong to the "default"
-// session, which keeps the pre-session behaviour for the CLI.
+// Several Claude sessions (and subagents) share one brojevd. Each gets a
+// session: a window of its own in the Chrome of one profile, with its own
+// current tab, its own tabs and its own action queue. A session never changes
+// profile; a different profile means a different session, so one agent can
+// drive several profiles side by side. Requests without a session id belong
+// to the "default" session, which keeps the pre-session behaviour for the CLI.
 
 const (
 	defaultSession = "default"
 	maxSessions    = 8
 	subSep         = "#"
+	profSep        = "@" // unnamed sessions: one per profile
 )
 
 type session struct {
 	id    string
+	key   string // its key in Server.sessions and the owner maps
 	base  string // the lease holder: the id without the "#subagent" suffix
+	prof  profile.Profile
+	ln    *link // the Chrome of prof; never changes
 	sem   chan struct{}
 	cur   target.ID // guarded by Server.mu
 	owned map[target.ID]bool
@@ -39,40 +45,75 @@ type session struct {
 
 func (s *session) isDefault() bool { return s.id == defaultSession }
 
+// sessionReq is what one call says about the session it belongs to.
+type sessionReq struct {
+	id, base string
+	named    bool   // the caller picked a session name
+	profile  string // the profile the call asked for; empty means no preference
+}
+
 // resolveSession turns the request's session id and the optional per-call
-// "session" param (a subagent name) into the id that owns the call.
-func resolveSession(reqSession string, params json.RawMessage) (id, base string) {
-	base = reqSession
-	if base == "" {
-		base = defaultSession
+// "session" (a name the agent picked) and "profile" params into the session
+// that owns the call.
+func resolveSession(reqSession string, params json.RawMessage) sessionReq {
+	r := sessionReq{base: reqSession}
+	if r.base == "" {
+		r.base = defaultSession
 	}
 	var p struct {
 		Session string `json:"session"`
+		Profile string `json:"profile"`
 	}
 	if len(params) > 0 {
 		_ = json.Unmarshal(params, &p)
 	}
-	if p.Session == "" {
-		return base, base
+	r.id, r.profile = r.base, p.Profile
+	if p.Session != "" {
+		r.id, r.named = r.base+subSep+p.Session, true
 	}
-	return base + subSep + p.Session, base
+	return r
 }
 
 // sessionFor returns the session, creating it (up to maxSessions).
-func (s *Server) sessionFor(id, base string) (*session, error) {
+//
+// A named session is locked to the profile it was created on: asking for it
+// with another profile is an error. A caller that names no session gets one
+// window per profile, so "no name" always means "my window on that profile".
+func (s *Server) sessionFor(r sessionReq) (*session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions == nil {
 		s.sessions = map[string]*session{}
 	}
-	if sess := s.sessions[id]; sess != nil {
-		return sess, nil
+	if r.named {
+		if sess := s.sessions[r.id]; sess != nil {
+			if r.profile != "" && r.profile != sess.prof.Name {
+				return nil, fmt.Errorf("session %q is on profile %q and cannot move to %q: use another session name for that profile",
+					strings.TrimPrefix(r.id, r.base+subSep), sess.prof.Name, r.profile)
+			}
+			return sess, nil
+		}
 	}
-	if id != defaultSession && s.namedLocked() >= maxSessions {
+	prof, err := resolveProfile(r.profile)
+	if err != nil {
+		return nil, err
+	}
+	key := r.id
+	if !r.named {
+		key += profSep + prof.Name
+		if sess := s.sessions[key]; sess != nil {
+			return sess, nil
+		}
+	}
+	if r.id != defaultSession && s.namedLocked() >= maxSessions {
 		return nil, fmt.Errorf("too many concurrent brojev sessions (max %d): close one or wait for an idle session to expire", maxSessions)
 	}
-	sess := &session{id: id, base: base, sem: make(chan struct{}, 1), owned: map[target.ID]bool{}}
-	s.sessions[id] = sess
+	ln, err := s.linkForLocked(prof)
+	if err != nil {
+		return nil, err
+	}
+	sess := &session{id: r.id, key: key, base: r.base, prof: prof, ln: ln, sem: make(chan struct{}, 1), owned: map[target.ID]bool{}}
+	s.sessions[key] = sess
 	return sess, nil
 }
 
@@ -92,23 +133,20 @@ func (s *Server) claim(sess *session, id target.ID) {
 		return
 	}
 	s.mu.Lock()
-	if s.owner == nil {
-		s.owner = map[target.ID]string{}
-	}
-	s.owner[id] = sess.id
+	sess.ln.owner[id] = sess.key
 	sess.owned[id] = true
 	s.mu.Unlock()
 }
 
-// unclaim forgets a closed tab.
-func (s *Server) unclaim(id target.ID) {
+// unclaim forgets a closed tab of ln.
+func (s *Server) unclaim(ln *link, id target.ID) {
 	s.mu.Lock()
-	if o := s.owner[id]; o != "" {
+	if o := ln.owner[id]; o != "" {
 		if sess := s.sessions[o]; sess != nil {
 			delete(sess.owned, id)
 		}
 	}
-	delete(s.owner, id)
+	delete(ln.owner, id)
 	s.mu.Unlock()
 }
 
@@ -116,12 +154,12 @@ func (s *Server) unclaim(id target.ID) {
 // another named session need an explicit shared flag.
 func (s *Server) canTouch(sess *session, id target.ID, shared bool) bool {
 	s.mu.Lock()
-	o := s.owner[id]
+	o := sess.ln.owner[id]
 	s.mu.Unlock()
 	if sess.isDefault() {
 		return o == "" || shared
 	}
-	return o == sess.id || shared
+	return o == sess.key || shared
 }
 
 // sessionPages lists the tabs sess works with: the ones it owns (plus popups
@@ -133,44 +171,42 @@ func (s *Server) sessionPages(ctx context.Context, b *browser.Browser, sess *ses
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.owner == nil {
-		s.owner = map[target.ID]string{}
-	}
+	owner := sess.ln.owner
 	alive := make(map[target.ID]bool, len(pages))
 	for _, t := range pages {
 		alive[t.TargetID] = true
 	}
-	for id, o := range s.owner { // tabs closed behind our back
+	for id, o := range owner { // tabs closed behind our back
 		if !alive[id] {
 			if ow := s.sessions[o]; ow != nil {
 				delete(ow.owned, id)
 			}
-			delete(s.owner, id)
+			delete(owner, id)
 		}
 	}
 	// A popup belongs to the session of the tab that opened it.
 	for changed := true; changed; {
 		changed = false
 		for _, t := range pages {
-			if s.owner[t.TargetID] != "" || t.OpenerID == "" {
+			if owner[t.TargetID] != "" || t.OpenerID == "" {
 				continue
 			}
-			if o := s.owner[t.OpenerID]; o != "" {
+			if o := owner[t.OpenerID]; o != "" {
 				if ow := s.sessions[o]; ow != nil {
-					s.owner[t.TargetID] = o
+					owner[t.TargetID] = o
 					ow.owned[t.TargetID] = true
 					changed = true
 				}
 			}
 		}
 	}
-	want := sess.id
+	want := sess.key
 	if sess.isDefault() {
 		want = ""
 	}
 	var out []*target.Info
 	for _, t := range pages {
-		if s.owner[t.TargetID] == want {
+		if owner[t.TargetID] == want {
 			out = append(out, t)
 		}
 	}
@@ -225,62 +261,59 @@ func (s *Server) reap(base string) {
 		s.mu.Unlock()
 		return
 	}
-	var tabs []target.ID
-	for id, sess := range s.sessions {
+	type closing struct {
+		b  *browser.Browser
+		id target.ID
+	}
+	var tabs []closing
+	for key, sess := range s.sessions {
 		if sess.base != base || sess.isDefault() {
 			continue
 		}
+		ln := sess.ln
+		keep := ln.b == nil || ln.keepLocked()
 		for t := range sess.owned {
-			tabs = append(tabs, t)
-			delete(s.owner, t)
-			if p := s.pages[t]; p != nil {
+			if !keep {
+				tabs = append(tabs, closing{ln.b, t})
+			}
+			delete(ln.owner, t)
+			if p := ln.pages[t]; p != nil {
 				p.Close()
-				delete(s.pages, t)
+				delete(ln.pages, t)
 			}
 		}
-		delete(s.sessions, id)
+		delete(s.sessions, key)
 	}
-	b, attach := s.browser, s.prof.Attach || CDPURL() != ""
 	s.mu.Unlock()
-	if b == nil || attach {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, t := range tabs {
-		_ = b.CloseTab(ctx, t)
+		_ = t.b.CloseTab(ctx, t.id)
 	}
 	if len(tabs) > 0 {
 		log.Printf("session %s ended: closed %d tab(s)", base, len(tabs))
 	}
 }
 
-// otherLiveBases lists leased sessions other than the caller's.
-func (s *Server) otherLiveBases(caller string) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []string
-	for base, n := range s.leases {
-		if n > 0 && base != caller {
-			out = append(out, base)
-		}
-	}
-	return out
-}
-
-// stateFile is the default state_save/state_load path of a session.
+// stateFile is the default state_save/state_load path of a session. Logins
+// of one profile never land in the default file of another.
 func stateFile(sess *session) string {
-	name := "state.json"
-	if !sess.isDefault() {
-		clean := strings.Map(func(r rune) rune {
+	clean := func(v string) string {
+		return strings.Map(func(r rune) rune {
 			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
 				return r
 			}
 			return '_'
-		}, sess.id)
-		name = "state-" + clean + ".json"
+		}, v)
 	}
-	return name
+	name := "state"
+	if !sess.isDefault() {
+		name += "-" + clean(sess.id)
+	}
+	if n := sess.prof.Name; n != "" && n != "default" {
+		name += "." + clean(n)
+	}
+	return name + ".json"
 }
 
 var errNotYours = errors.New("that tab belongs to another brojev session; pass shared=true to use it anyway")
@@ -294,8 +327,8 @@ func (s *Server) sessionCount() int {
 // namedLocked counts the sessions other than the default one.
 func (s *Server) namedLocked() int {
 	n := 0
-	for id := range s.sessions {
-		if id != defaultSession {
+	for _, sess := range s.sessions {
+		if !sess.isDefault() {
 			n++
 		}
 	}

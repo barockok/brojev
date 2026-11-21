@@ -26,24 +26,81 @@ func Run(ctx context.Context) error {
 }
 
 func New() *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "brojev", Version: version.Version}, &mcp.ServerOptions{Instructions: instructions})
+	text := instructions
+	if pinned = pinFromEnv(); pinned != "" {
+		text += "\nThis server is pinned to the profile \"" + pinned + "\": every session runs there and no other profile can be chosen."
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: "brojev", Version: version.Version}, &mcp.ServerOptions{Instructions: text})
 	register(s)
 	return s
 }
 
-const instructions = `brojev drives a dedicated Chrome profile (logins persist there).
+const instructions = `brojev drives Chrome profiles (logins persist in each profile; the default is a dedicated one).
 Fast path: call run with a concrete goal (and values you already know); it executes the whole sub-task in a few seconds and returns the final page.
 Use the primitive tools (snapshot, click, type, ...) when run returns needs_claude/blocked, for canvas or unusual widgets, or for exact control.
 A blocked or needs_claude result is a hand-off, not the end: do that step yourself, then resume run, and keep going until the task is verifiably done or stops making progress.
 Refs like e12 / f2e5 come from the latest snapshot; take a new one if a ref is stale.
-Other Claude sessions may use the browser at the same time; you only see and touch your own tabs. If you run in parallel with other agents inside one session (subagents), pass a short unique "session" name on every call to get your own window.`
+Other Claude sessions may use the browser at the same time; you only see and touch your own tabs.
+A session is one browser window on one profile. Pass a short "session" name on every call to get a window of your own (parallel subagents must do this); the same name always comes back to the same window.
+Pass "profile" to work on another profile (list them with the profile tool): a new session name with a profile opens a window there, and several sessions can run on different profiles side by side. A session never changes profile.`
 
 type empty struct{}
 
 // Sess is embedded in every tool input. Claude Code subagents share this
 // process, so without it they would share one browser tab.
 type Sess struct {
-	Session string `json:"session,omitempty" jsonschema:"only for parallel subagents: pick a short unique name (e.g. 'research-1') so this subagent gets its own browser window and tabs; reuse the same name on every call. Omit if you are the only one using the browser."`
+	Session string `json:"session,omitempty" jsonschema:"a short name you pick (e.g. 'research-1') for a browser window of your own with its own tabs; reuse the same name on every call to come back to it. Needed for parallel subagents and for working on several profiles at once. Omit to use your default window."`
+	Profile string `json:"profile,omitempty" jsonschema:"Chrome profile for this session's window (names: profile tool, action=list). Only matters when the session starts: a session stays on its profile, so use another session name for another profile. Omit for the default profile. The real Chrome profile ('chrome') only with the user's consent."`
+}
+
+// PinEnv names the one profile this MCP server may drive. Set it in the MCP
+// server's env to keep an agent on that profile: it cannot pick another one
+// or change the profile list. Unset, the agent chooses freely.
+const PinEnv = "BROJEV_PIN_PROFILE"
+
+// pinned is the pin of this process, read once when the server is built.
+var pinned string
+
+// pinFromEnv reads the pin: the plugin setting (which arrives as an
+// unexpanded "${...}" placeholder when unset) wins over the variable.
+func pinFromEnv() string {
+	for _, k := range []string{"BROJEV_SETTING_PIN_PROFILE", PinEnv} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" && !strings.HasPrefix(v, "${") {
+			return v
+		}
+	}
+	return ""
+}
+
+// applyPin makes a daemon call obey the pin: browser calls run on the pinned
+// profile and the profile tool is read-only.
+func applyPin(pin, method string, params any) (any, error) {
+	switch {
+	case pin == "", method == "keys":
+		return params, nil
+	}
+	m, err := toParams(params)
+	if err != nil {
+		return nil, err
+	}
+	denied := func(what string) error {
+		return fmt.Errorf("%s: this brojev server is pinned to the profile %q (%s in its MCP config), so no other profile can be used", what, pin, PinEnv)
+	}
+	if method == "profile" {
+		switch action, _ := m["action"].(string); action {
+		case "current":
+			m["name"] = pin
+		case "", "list", "chrome-profiles":
+		default:
+			return nil, denied("profile " + action)
+		}
+		return m, nil
+	}
+	if p, _ := m["profile"].(string); p != "" && p != pin {
+		return nil, denied("profile " + p)
+	}
+	m["profile"] = pin
+	return m, nil
 }
 
 // sessionID names this brojev-mcp process to the daemon. A Claude Code
@@ -125,8 +182,12 @@ func call(ctx context.Context, method string, params any) (json.RawMessage, erro
 	if err := forwardKeysOnce(ctx); err != nil && method == "run" {
 		return nil, err
 	}
+	params, err := applyPin(pinned, method, params)
+	if err != nil {
+		return nil, err
+	}
 	var out json.RawMessage
-	err := daemon.CallAs(ctx, sessionID, method, params, &out)
+	err = daemon.CallAs(ctx, sessionID, method, params, &out)
 	return out, err
 }
 
@@ -179,7 +240,13 @@ func toParams(in any) (map[string]any, error) {
 		return nil, err
 	}
 	m := map[string]any{}
-	return m, json.Unmarshal(b, &m)
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	if m == nil { // in was nil
+		m = map[string]any{}
+	}
+	return m, nil
 }
 
 func renderAction(method string, raw json.RawMessage) string {
@@ -378,19 +445,19 @@ type EmulateIn struct {
 }
 
 type ProfileIn struct {
-	Action        string `json:"action,omitempty" jsonschema:"list (default), current, chrome-profiles, add, use, remove"`
+	Action        string `json:"action,omitempty" jsonschema:"list (default), current, chrome-profiles, add, use (make it the default of sessions that name no profile), remove"`
 	Name          string `json:"name,omitempty" jsonschema:"profile name; built-ins: default (dedicated ~/.brojev/profile), chrome (the user's real Chrome, attach mode)"`
 	Dir           string `json:"dir,omitempty" jsonschema:"add: Chrome user data dir (default ~/.brojev/profiles/<name>); chrome-profiles: dir to inspect"`
 	ChromeProfile string `json:"chromeProfile,omitempty" jsonschema:"add: person inside the data dir, e.g. Default or Profile 3 (list them with action=chrome-profiles)"`
 	Attach        bool   `json:"attach,omitempty" jsonschema:"add: connect via chrome://inspect remote debugging (needed for the real Chrome dir; avoids navigator.webdriver)"`
-	Quit          bool   `json:"quit,omitempty" jsonschema:"use: also close the previous profile's Chrome"`
-	Force         bool   `json:"force,omitempty" jsonschema:"use: switch even though other Claude sessions are using the browser (they lose their tabs)"`
+	Quit          bool   `json:"quit,omitempty" jsonschema:"use: also close the previous default profile's Chrome"`
+	Force         bool   `json:"force,omitempty" jsonschema:"use with quit: close that Chrome even though other sessions are working in it (they lose their tabs)"`
 }
 
 type StateIn struct {
 	Sess
 	Action string `json:"action" jsonschema:"save or load"`
-	Path   string `json:"path,omitempty" jsonschema:"JSON file (default ~/.brojev/state.json)"`
+	Path   string `json:"path,omitempty" jsonschema:"JSON file (default: one per session and profile under ~/.brojev, e.g. state.json)"`
 }
 
 func register(s *mcp.Server) {
@@ -420,8 +487,9 @@ func register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{Name: "tabs", Description: "List, open, switch to, or close tabs. New tabs opened by the page are reported after actions."}, tabsTool)
 	mcp.AddTool(s, &mcp.Tool{Name: "downloads", Description: "List downloads (saved to ~/.brojev/downloads under their real names) with state and path."}, plain[empty]("downloads"))
 	mcp.AddTool(s, &mcp.Tool{Name: "emulate", Description: "Emulate a device or environment: viewport/mobile/touch, geolocation, timezone, locale, color scheme, offline, and pre-granted permissions."}, emulateTool)
-	mcp.AddTool(s, &mcp.Tool{Name: "profile", Description: "List, inspect, add or switch the Chrome profile brojev drives. Each profile keeps its own logins. " +
-		"Switching only with the user's consent: the real Chrome profile exposes their personal sessions and sends page text to the Jev API."}, plain[ProfileIn]("profile"))
+	mcp.AddTool(s, &mcp.Tool{Name: "profile", Description: "List, inspect or add the Chrome profiles brojev can drive, or set the default one. Each profile keeps its own logins and runs its own Chrome; " +
+		"to work on one, pass profile=<name> on the calls of a session. " +
+		"The real Chrome profile only with the user's consent: it exposes their personal sessions and sends page text to the Jev API."}, plain[ProfileIn]("profile"))
 	mcp.AddTool(s, &mcp.Tool{Name: "state", Description: "Save or load login state (all cookies plus localStorage of the current origin) to a JSON file."}, stateTool)
 }
 
@@ -560,7 +628,7 @@ func screenshotTool(ctx context.Context, _ *mcp.CallToolRequest, in ScreenshotIn
 
 func emulateTool(ctx context.Context, req *mcp.CallToolRequest, in EmulateIn) (*mcp.CallToolResult, any, error) {
 	if len(in.Permissions) > 0 {
-		if _, err := call(ctx, "grant", map[string]any{"permissions": in.Permissions, "session": in.Session}); err != nil {
+		if _, err := call(ctx, "grant", map[string]any{"permissions": in.Permissions, "session": in.Session, "profile": in.Profile}); err != nil {
 			return fail(err), nil, nil
 		}
 	}

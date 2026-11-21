@@ -43,7 +43,9 @@ Call the `profile` tool with no arguments to show the current setup, then explai
 - **`default`** (recommended to start): a dedicated Chrome profile in `~/.brojev/profile`. Nothing personal in it; the user logs in to the sites brojev needs once, in the brojev Chrome window, and the logins persist.
 - **The user's real Chrome** (attach mode): brojev uses their existing logins and tabs. Only with their explicit consent: page content from that profile goes into this conversation and, with `run`, to the Jev API. It needs a one-time switch in that Chrome (chrome://inspect/#remote-debugging, turn on remote debugging) and an "Allow" click each time the brojev daemon starts. Steps: `profile` with `action: "chrome-profiles"` lists the people in their Chrome (for example `Default`, `Profile 3`); ask which one, pin the built-in `chrome` profile to it with `action: "add", name: "chrome", chromeProfile: "<person>"`, then `action: "use", name: "chrome"`.
 
-Switching back later: `profile` with `action: "use", name: "default"`.
+Switching back later: `profile` with `action: "use", name: "default"`. `use` sets the default for sessions that name no profile; an agent can also pass `profile` on its calls to work on several profiles at once.
+
+To keep Claude on one profile only, the user sets the plugin's "Pin to one Chrome profile" setting to that profile's name (or `BROJEV_PIN_PROFILE` in the MCP server's env) and restarts Claude Code. Agents then cannot pick another profile.
 
 ## 4. Smoke test
 

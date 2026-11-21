@@ -218,20 +218,204 @@ func TestSessionLeaseCleansUp(t *testing.T) {
 	if got := tabCount(); got != n0 {
 		t.Fatalf("tabs after lease dropped: %d, want %d", got, n0)
 	}
-	// ...but a profile switch is refused while someone else holds a lease.
+	// ...and changing the default profile leaves a live session's window alone.
 	other, err := daemon.Lease(ctx, "busy")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer other.Close()
+	if err := daemon.CallAs(ctx, "busy", "tab_new", map[string]any{"url": "about:blank"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	n1 := tabCount()
 	if err := daemon.CallAs(ctx, "me", "profile", map[string]any{"action": "add", "name": "second"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	err = daemon.CallAs(ctx, "me", "profile", map[string]any{"action": "use", "name": "second"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "force") {
+	if err := daemon.CallAs(ctx, "me", "profile", map[string]any{"action": "use", "name": "second"}, nil); err != nil {
 		t.Fatalf("profile use while another session is live: %v", err)
 	}
-	if err := daemon.CallAs(ctx, "me", "profile", map[string]any{"action": "use", "name": "second", "force": true}, nil); err != nil {
-		t.Fatalf("forced profile use: %v", err)
+	var st struct {
+		Tabs    int    `json:"tabs"`
+		Profile string `json:"profile"`
+	}
+	if err := daemon.Call(ctx, "status", map[string]any{"profile": "default"}, &st); err != nil || st.Tabs != n1 {
+		t.Fatalf("default profile after profile use: %+v %v, want %d tabs", st, err, n1)
+	}
+	// Closing the old default's Chrome is refused while that session works there.
+	if err := daemon.CallAs(ctx, "me", "profile", map[string]any{"action": "use", "name": "default"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	err = daemon.CallAs(ctx, "me", "profile", map[string]any{"action": "use", "name": "second", "quit": true}, nil)
+	if err == nil || !strings.Contains(err.Error(), "force") {
+		t.Fatalf("profile use quit while another session is live: %v", err)
+	}
+}
+
+// One agent, several profiles: every session is a window on its own profile,
+// each profile is its own Chrome, and they run side by side.
+func TestProfilesSideBySide(t *testing.T) {
+	if os.Getenv("BROJEV_E2E") != "1" {
+		t.Skip("set BROJEV_E2E=1")
+	}
+	ctx := startTestDaemon(t)
+	if err := daemon.Call(ctx, "profile", map[string]any{"action": "add", "name": "second"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ct, st := mcp.NewInMemoryTransports()
+	go New().Run(ctx, st)
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(name string, args map[string]any) (string, error) {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*mcp.TextContent); ok {
+				b.WriteString(tc.Text)
+			}
+		}
+		if res.IsError {
+			return b.String(), fmt.Errorf("%s", b.String())
+		}
+		return b.String(), nil
+	}
+	page := func(title string) string {
+		return "data:text/html," + url.PathEscape("<title>"+title+"</title><h1>"+title+"</h1>")
+	}
+
+	// Two sessions on two profiles, started at the same time.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, c := range []map[string]any{
+		{"session": "a", "url": page("page-a")},
+		{"session": "b", "profile": "second", "url": page("page-b")},
+	} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = call("navigate", c)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("navigate %d: %v", i, err)
+		}
+	}
+	// Each comes back to its own window, without repeating the profile.
+	if out, err := call("snapshot", map[string]any{"session": "a"}); err != nil || !strings.Contains(out, "page-a") || strings.Contains(out, "page-b") {
+		t.Fatalf("a: %q %v", out, err)
+	}
+	if out, err := call("snapshot", map[string]any{"session": "b"}); err != nil || !strings.Contains(out, "page-b") || strings.Contains(out, "page-a") {
+		t.Fatalf("b: %q %v", out, err)
+	}
+	// A session cannot move to another profile.
+	if out, err := call("snapshot", map[string]any{"session": "a", "profile": "second"}); err == nil || !strings.Contains(out, "cannot move") {
+		t.Fatalf("a on second: %q %v", out, err)
+	}
+	// A third session on the second profile: a window of its own in that Chrome.
+	if _, err := call("navigate", map[string]any{"session": "c", "profile": "second", "url": page("page-c")}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := call("tabs", map[string]any{"session": "b"}); err != nil || !strings.Contains(out, "page-b") || strings.Contains(out, "page-c") {
+		t.Fatalf("b tabs: %q %v", out, err)
+	}
+
+	// The two profiles are two Chromes.
+	status := func(prof string) (st struct {
+		Endpoint   string `json:"endpoint"`
+		ProfileDir string `json:"profileDir"`
+		Tabs       int    `json:"tabs"`
+		Browsers   []struct {
+			Profile  string `json:"profile"`
+			Sessions int    `json:"sessions"`
+		} `json:"browsers"`
+	}) {
+		if err := daemon.Call(ctx, "status", map[string]any{"profile": prof}, &st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	d, s2 := status("default"), status("second")
+	if d.Endpoint == s2.Endpoint || d.ProfileDir == s2.ProfileDir {
+		t.Fatalf("both profiles on one Chrome: %+v %+v", d, s2)
+	}
+	got := map[string]int{}
+	for _, b := range s2.Browsers {
+		got[b.Profile] = b.Sessions
+	}
+	if got["default"] != 1 || got["second"] != 2 {
+		t.Fatalf("sessions per browser = %v, want default:1 second:2", got)
+	}
+	if out, err := call("profile", map[string]any{}); err != nil || !strings.Contains(out, `"sessions":2`) {
+		t.Fatalf("profile list: %q %v", out, err)
+	}
+}
+
+// A server pinned in its MCP config drives that one profile and nothing else.
+func TestPinnedServer(t *testing.T) {
+	if os.Getenv("BROJEV_E2E") != "1" {
+		t.Skip("set BROJEV_E2E=1")
+	}
+	ctx := startTestDaemon(t)
+	if err := daemon.Call(ctx, "profile", map[string]any{"action": "add", "name": "second"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(PinEnv, "second")
+	t.Cleanup(func() { pinned = "" })
+
+	ct, st := mcp.NewInMemoryTransports()
+	go New().Run(ctx, st)
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(name string, args map[string]any) (string, bool) {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*mcp.TextContent); ok {
+				b.WriteString(tc.Text)
+			}
+		}
+		return b.String(), !res.IsError
+	}
+	page := "data:text/html," + url.PathEscape("<title>pinned</title><h1>pinned</h1>")
+
+	// No profile given: the pin, not the default profile.
+	if out, ok := call("navigate", map[string]any{"session": "a", "url": page}); !ok {
+		t.Fatalf("navigate: %s", out)
+	}
+	var stt struct {
+		Browsers []struct {
+			Profile  string `json:"profile"`
+			Sessions int    `json:"sessions"`
+		} `json:"browsers"`
+	}
+	if err := daemon.Call(ctx, "status", map[string]any{"profile": "second"}, &stt); err != nil {
+		t.Fatal(err)
+	}
+	if len(stt.Browsers) != 1 || stt.Browsers[0].Profile != "second" || stt.Browsers[0].Sessions != 1 {
+		t.Fatalf("browsers = %+v, want only second with 1 session", stt.Browsers)
+	}
+	// Another profile cannot be chosen, and the default cannot be changed.
+	for name, args := range map[string]map[string]any{
+		"navigate": {"session": "b", "profile": "default", "url": page},
+		"profile":  {"action": "use", "name": "default"},
+	} {
+		if out, ok := call(name, args); ok || !strings.Contains(out, "pinned") {
+			t.Fatalf("%s past the pin: ok=%v %q", name, ok, out)
+		}
+	}
+	if out, ok := call("profile", map[string]any{"action": "current"}); !ok || !strings.Contains(out, `"name":"second"`) {
+		t.Fatalf("profile current: ok=%v %q", ok, out)
 	}
 }

@@ -90,6 +90,9 @@ func batchTool(ctx context.Context, _ *mcp.CallToolRequest, in BatchIn) (*mcp.Ca
 		if in.Session != "" {
 			params["session"] = in.Session
 		}
+		if in.Profile != "" {
+			params["profile"] = in.Profile
+		}
 		if !plains[i] {
 			params["snapshot"] = false
 		}
@@ -120,7 +123,7 @@ func batchTool(ctx context.Context, _ *mcp.CallToolRequest, in BatchIn) (*mcp.Ca
 	}
 
 	if in.Snapshot == nil || *in.Snapshot {
-		raw, err := call(ctx, "snapshot", map[string]any{"session": in.Session})
+		raw, err := call(ctx, "snapshot", map[string]any{"session": in.Session, "profile": in.Profile})
 		if err != nil {
 			fmt.Fprintf(&b, "snapshot failed: %v\n", err)
 		} else {

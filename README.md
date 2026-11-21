@@ -111,13 +111,14 @@ Limits: full-page Cloudflare interstitials are detected and reported, not solved
 ## How it works
 
 ```
-Claude Code --stdio--> brojev mcp --unix socket--> brojevd --one CDP WebSocket--> Chrome (~/.brojev/profile)
+Claude Code --stdio--> brojev mcp --unix socket--> brojevd --one CDP WebSocket per profile--> Chrome (~/.brojev/profile, ...)
                                                       |
                                                       +-- run: snapshot -> 1 Jev request -> validate -> execute -> repeat
 ```
 
-- **brojevd** is a background daemon that owns the single browser connection, so tabs, refs and logins persist across tool calls and Claude sessions. It is started automatically.
+- **brojevd** is a background daemon that owns the browser connections (one per Chrome profile in use), so tabs, refs and logins persist across tool calls and Claude sessions. It is started automatically.
 - **Dedicated profile**: Chrome runs on `~/.brojev/profile`, separate from your normal browsing. Log in to sites there once.
+- **Sessions and profiles**: a session is one browser window on one profile. An agent names a session to get a window of its own and passes `profile` to open it on another profile, so one agent can work on several profiles side by side, each in its own Chrome. A session never changes profile. To keep an agent on a single profile, set the plugin's "Pin to one Chrome profile" setting (or `BROJEV_PIN_PROFILE` in the MCP server's env): it then cannot pick another profile or change the profile list.
 - **Snapshot**: one isolated-world script per frame, all frames in parallel. Elements get stable refs (`e12`, `f2e5` for frame 2). Names follow the accessibility name rules, so a calendar cell reads "Friday, November 20, 2026".
 - **Actionability**: before input, the target is scrolled into view, checked for a stable box, and hit-tested at up to five points. Clicks on covered elements are refused instead of landing on an overlay.
 - **Jev loop**: per step, one request carries an operation question plus one target question per operation (CLICK, TYPE_TEXT, SELECT, HOVER, DRAG, UPLOAD, PRESS_KEY, SCROLL, BACK, WAIT, dialog accept/dismiss, DONE, BLOCKED). Options are restricted by construction to elements the operation can act on. Answers are validated before anything executes. Values Claude provides become field/value pairs, so typing needs no text model. Low confidence, stalls, or repeated failures hand control back to Claude with the current page.
@@ -131,17 +132,18 @@ brojev bench eval/tasks.json           # Jev loop on the live task suite
 brojev stop                            # stop the daemon (Chrome keeps running)
 ```
 
-Profiles (each with its own logins; `*` marks the active one):
+Profiles (each with its own logins and its own Chrome; `*` marks the default one, used by sessions that name no profile):
 
 ```sh
 brojev profile                                   # list
 brojev profile add work                          # new dedicated profile in ~/.brojev/profiles/work
 brojev profile chrome-profiles                   # people inside your real Chrome
 brojev profile add me --dir "~/Library/Application Support/Google/Chrome" --chrome-profile "Profile 3"   # attach mode is forced for the real dir
-brojev profile use work [--quit]                 # switch; --quit closes the previous profile's Chrome
+brojev profile use work [--quit]                 # make it the default; --quit closes the previous default's Chrome
+brojev navigate '{"url":"https://example.com","profile":"work"}'   # one call on another profile
 ```
 
-Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir, overrides the active profile; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; profile switching is refused; the daemon keeps one idle `about:blank#brojev-guard` tab open, hidden from `tabs`, so the window never closes), `BROJEV_NO_SPAWN=1` (clients never start or replace the daemon and `brojev stop` is refused; they fail if it is not running or runs another version. The daemon itself still accepts `shutdown` from any socket client), `CAPSOLVER_API_KEY` (optional Turnstile fallback), `TURNSTILE_VISUAL` (`jev` adds the image click before CapSolver), `TURNSTILE_TIMEOUT_MS` (default 60000), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
+Environment: `BROJEV_HOME` (default `~/.brojev`), `BROJEV_PROFILE` (ad hoc Chrome data dir for the daemon, which then drives only that one and refuses a profile chosen per session; `BROJEV_CHROME_PROFILE` picks a person in it), `BROJEV_PIN_PROFILE` (in the MCP server's env: the only profile that server's agents may use), `BROJEV_HEADLESS=1`, `BROJEV_ATTACH=1` (connect through `chrome://inspect/#remote-debugging` instead of launching with a debug port), `BROJEV_CHROME` (binary path), `BROJEV_CHROME_ARGS` (extra Chrome flags, space separated), `BROJEV_CDP_URL` (DevTools HTTP base of a Chrome you run, e.g. `http://127.0.0.1:9223`: the daemon attaches to it and never launches, quits or relaunches it; choosing or switching profiles is refused; the daemon keeps one idle `about:blank#brojev-guard` tab open, hidden from `tabs`, so the window never closes), `BROJEV_NO_SPAWN=1` (clients never start or replace the daemon and `brojev stop` is refused; they fail if it is not running or runs another version. The daemon itself still accepts `shutdown` from any socket client), `CAPSOLVER_API_KEY` (optional Turnstile fallback), `TURNSTILE_VISUAL` (`jev` adds the image click before CapSolver), `TURNSTILE_TIMEOUT_MS` (default 60000), `TYPESAFE_MODEL`, `JEV_PROVIDER` (`auto`, `openrouter` or `typesafe`), `JEV_ENDPOINT` (Jev URL override), `TEXT_MODEL`, `TEXT_MODEL_BASE_URL`.
 
 ## Shared host daemon
 
