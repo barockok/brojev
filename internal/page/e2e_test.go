@@ -157,6 +157,51 @@ addEventListener('message', (e) => {
 <input type=hidden name=cf-turnstile-response id=r2>
 </div><p id=out></p>`,
 
+	// Full-page challenges shaped like Cloudflare's: "Just a moment..." title,
+	// a cross-site frame inside a closed shadow root, and a pass that leaves
+	// the challenge page (Cloudflare reloads with its clearance cookie).
+	"/cf-challenge": `<title>Just a moment...</title><p>Performing security verification</p><div id=host></div>
+<script>
+const f = document.createElement('iframe');
+f.src = location.href.replace('127.0.0.1', 'localhost').replace(/\/cf-challenge.*$/, '/cf-challenge-frame');
+f.style.cssText = 'width:300px;height:65px;border:1px solid';
+host.attachShadow({mode: 'closed'}).appendChild(f);
+addEventListener('message', (e) => { if (e.data === 'pass') location.href = '/nav2'; });
+</script>`,
+	"/cf-challenge-frame": `<title>challenge frame</title><label><input type=checkbox id=cb> Verify you are human</label>
+<script>cb.addEventListener('click', () => parent.postMessage('pass', '*'));</script>`,
+	// The same page carrying widget markers of its own (a response input).
+	"/cf-challenge-marked": `<title>Just a moment...</title><div class="cf-turnstile" data-sitekey="0x4AAAAAAADnPIDROrmt1Wwj"><input type=hidden name=cf-turnstile-response></div><div id=host></div>
+<script>
+const f = document.createElement('iframe');
+f.src = location.href.replace('127.0.0.1', 'localhost').replace(/\/cf-challenge.*$/, '/cf-challenge-frame');
+f.style.cssText = 'width:300px;height:65px;border:1px solid';
+host.attachShadow({mode: 'closed'}).appendChild(f);
+addEventListener('message', (e) => { if (e.data === 'pass') location.href = '/nav2'; });
+</script>`,
+	// A wide frame whose checkbox sits at x=400 inside a closed shadow root of
+	// the frame: unreachable for the in-page script, missed by the left-center
+	// click, hit by the visual box.
+	"/cf-challenge-wide": `<title>Just a moment...</title><div id=host></div>
+<script>
+const f = document.createElement('iframe');
+f.src = location.href.replace('127.0.0.1', 'localhost').replace(/\/cf-challenge.*$/, '/cf-challenge-frame-wide');
+f.style.cssText = 'width:600px;height:65px;border:0';
+host.attachShadow({mode: 'closed'}).appendChild(f);
+addEventListener('message', (e) => { if (e.data === 'pass') location.href = '/nav2'; });
+</script>`,
+	"/cf-challenge-frame-wide": `<title>challenge frame wide</title><body style="margin:0"><div id=h></div>
+<script>
+const r = h.attachShadow({mode: 'closed'});
+r.innerHTML = '<div id=cb style="position:absolute;left:400px;top:20px;width:24px;height:24px;background:#ddd"></div>';
+r.getElementById('cb').addEventListener('click', () => parent.postMessage('pass', '*'));
+</script></body>`,
+	// Passes on its own after a moment, as many challenges do.
+	"/cf-challenge-auto": `<title>Just a moment...</title><p>Checking your browser</p>
+<script>setTimeout(() => { location.href = '/nav2'; }, 1200);</script>`,
+	// Never renders a frame (seen on Seek from a datacenter IP).
+	"/cf-challenge-blank": `<title>Just a moment...</title>`,
+
 	// Two real interactive widgets with the same sitekey.
 	"/turnstile-multi-real": `<title>turnstile multi real</title>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>

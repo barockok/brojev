@@ -99,14 +99,17 @@ brojev detects Turnstile widgets and resolves them itself, on every page call: a
 2. Visual click (opt-in): when `TURNSTILE_VISUAL=jev` is set and the in-page attempt fails, brojev captures a clipped PNG around the widget, asks Jev for the checkbox box, `noul` presence and widget state, then clicks the returned box. Cost is about $0.00005 to $0.00025 per attempt and latency is a few hundred milliseconds. This is useful when a theme, language or layout moves the checkbox away from the blind left-center point. It needs a Jev key.
 3. CapSolver fallback: if the earlier steps fail and `CAPSOLVER_API_KEY` is set, brojev sends the page URL, sitekey, `data-action` and `data-cdata` to CapSolver (`AntiTurnstileTaskProxyLess`), then injects the returned token into the response input. CapSolver lists Turnstile at $1.20 per 1,000 solves, so about $0.0012 per task. Without a key, brojev stays in-page and visual only.
 
-The whole attempt is bounded by `TURNSTILE_TIMEOUT_MS` (default 60000), with at most two attempts per widget on a page. When a widget is present, replies and snapshots carry one line:
+Full-page challenges ("Just a moment...", "Performing security verification") are handled too. Their checkbox sits in a `challenges.cloudflare.com` frame, usually inside a closed shadow root, and they pass by leaving the challenge page rather than by a token. brojev waits up to 8 seconds for that frame through the CDP frame tree (many challenges pass on their own meanwhile), clicks the checkbox inside it, or the frame's left-center when the checkbox is out of reach, and then, with `TURNSTILE_VISUAL=jev`, runs the visual click on a clip around the frame (the middle of the viewport when no frame renders). Success is the challenge page going away. CapSolver is not used here: a form token does not clear a full-page challenge.
+
+The whole attempt is bounded by `TURNSTILE_TIMEOUT_MS` (default 60000), with at most two attempts per widget (or per challenged host) on a page. When a widget is present, replies and snapshots carry one line:
 
 ```
 TURNSTILE: solved
 TURNSTILE: unresolved (in-page attempt failed; CapSolver not configured)
+TURNSTILE: interstitial (full-page Cloudflare challenge; in-page click did not pass; visual: checkbox not located (present=false conf=0.00))
 ```
 
-Limits: full-page Cloudflare interstitials are detected and reported, not solved. Token injection covers standard form posts; callback-only widgets that never read the response input may stay unresolved. The visual phase was validated against Cloudflare's `3x` key and local widgets through TypeSafe; image routing through OpenRouter is untested. Set `CAPSOLVER_API_KEY` in `~/.brojev/env` or the plugin settings, and `TURNSTILE_VISUAL=jev` in `~/.brojev/env` or the environment, to enable the fallbacks for every session; `brojev doctor` shows what is configured.
+Limits: a full-page challenge that never renders its frame, or that rejects the browser or its IP whatever is clicked, stays unresolved and is reported; `run` then returns `blocked` with the reason. Token injection covers standard form posts; callback-only widgets that never read the response input may stay unresolved. The visual phase was validated against Cloudflare's `3x` key and local widgets through TypeSafe; image routing through OpenRouter is untested. Set `CAPSOLVER_API_KEY` in `~/.brojev/env` or the plugin settings, and `TURNSTILE_VISUAL=jev` in `~/.brojev/env` or the environment, to enable the fallbacks for every session; `brojev doctor` shows what is configured.
 
 ## How it works
 
@@ -180,7 +183,7 @@ python3 eval/claude_bench.py --config brojev=a.json --config playwright=b.json  
 - Supported on macOS and Linux (arm64, amd64). Windows is not supported yet.
 - Closed shadow roots, canvas apps and OS-level UI need the coordinate and screenshot tools.
 - Jev is weak at numbers and comparisons ("cheapest", counting, date arithmetic): Claude should do those from snapshots and pass exact values.
-- **Cloudflare Turnstile** is detected and resolved automatically (in-page click, then CapSolver when a key is set). Full-page interstitials and other captcha types still go to the user; brojev does not patch fingerprints or spoof browser signals.
+- **Cloudflare Turnstile** is detected and resolved automatically (in-page click, the opt-in visual click, then CapSolver when a key is set), and so are full-page Cloudflare challenges (in-page and visual click). A challenge that still does not pass, and other captcha types, go to the user; brojev does not patch fingerprints or spoof browser signals.
 
 ## Credits
 
