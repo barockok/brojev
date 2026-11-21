@@ -2,3 +2,4 @@ build/
 eval/results-*.json
 dist/
 NOTES.md
+.worktrees/
