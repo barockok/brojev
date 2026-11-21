@@ -11,11 +11,12 @@ Claude Code ──stdio──> brojev MCP server (thin, per session)
                             │ local IPC (unix socket)
                             v
                        brojevd (long-lived daemon)
-                            │ one CDP WebSocket, held open
+                            │ one CDP WebSocket per profile in use, held open
                             v
                          Chrome (user profile via chrome://inspect toggle, or dedicated profile)
 ```
-- Daemon holds a single WebSocket so Chrome's "Allow remote debugging?" prompt appears once, not per tool call.
+- Daemon holds a single WebSocket per Chrome so its "Allow remote debugging?" prompt appears once, not per tool call.
+- A session is one window on one profile and never changes profile. The daemon keeps one connection per profile data dir (profiles that share a dir share a Chrome), so sessions on different profiles run side by side. See `docs/plans/2026-11-20-multi-profile-sessions-design.md`.
 - Connect via `DevToolsActivePort` (port + ws path), not `/json` (404 on toggle route).
 - Never pass `--enable-automation`; avoid `Runtime.enable`; run our JS in an isolated world.
 - brojev opens its own tabs in its own window (no hidden-tab throttling, no focus stealing).

@@ -51,3 +51,20 @@ func TestApplyPin(t *testing.T) {
 		t.Fatalf("keys: %v %v", got, err)
 	}
 }
+
+func TestPinFromEnv(t *testing.T) {
+	cases := []struct{ setting, env, want string }{
+		{"", "", ""},
+		{"", "work", "work"},
+		{"${user_config.pin_profile}", "", ""}, // an unset plugin setting arrives unexpanded
+		{"${user_config.pin_profile}", "work", "work"},
+		{" play ", "work", "play"}, // the plugin setting wins
+	}
+	for _, c := range cases {
+		t.Setenv("BROJEV_SETTING_PIN_PROFILE", c.setting)
+		t.Setenv(PinEnv, c.env)
+		if got := pinFromEnv(); got != c.want {
+			t.Errorf("setting=%q env=%q: pin = %q, want %q", c.setting, c.env, got, c.want)
+		}
+	}
+}

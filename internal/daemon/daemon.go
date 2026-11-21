@@ -74,7 +74,7 @@ type Server struct {
 	mu       sync.Mutex
 	links    map[string]*link // data dir -> the Chrome of the profiles on it
 	sessions map[string]*session
-	leases   map[string]int       // session base -> open lease connections
+	leases   map[string]int // session base -> open lease connections
 	pending  map[string]*time.Timer
 	jev      *jev.Client
 	llm      *llm.Client

@@ -1,7 +1,7 @@
 {
   "name": "brojev",
   "displayName": "brojev (browser jev)",
-  "description": "Fast browser agent for Claude Code: a Jev-driven run tool that completes browser sub-tasks in seconds, plus full Playwright-level primitives (snapshot, click, type, iframes, shadow DOM, dialogs, uploads, drag, tabs, emulation) on a dedicated Chrome profile. No Playwright, no extension.",
+  "description": "Fast browser agent for Claude Code: a Jev-driven run tool that completes browser sub-tasks in seconds, plus full Playwright-level primitives (snapshot, click, type, iframes, shadow DOM, dialogs, uploads, drag, tabs, emulation) on a dedicated Chrome profile, or several profiles side by side. No Playwright, no extension.",
   "version": "0.8.0",
   "author": {
     "name": "Zidni Mubarok"
@@ -40,6 +40,12 @@
       "title": "Jev provider",
       "description": "Where the run tool calls Jev: auto (default: TypeSafe when its key is set, otherwise OpenRouter), openrouter, or typesafe.",
       "default": "auto",
+      "sensitive": false
+    },
+    "pin_profile": {
+      "type": "string",
+      "title": "Pin to one Chrome profile (optional)",
+      "description": "Name of the only brojev profile this Claude Code may drive (see: brojev profile). Agents then cannot pick another profile or change the profile list. Leave empty to let agents choose a profile per session.",
       "sensitive": false
     }
   }

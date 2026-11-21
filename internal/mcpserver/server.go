@@ -26,19 +26,23 @@ func Run(ctx context.Context) error {
 }
 
 func New() *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "brojev", Version: version.Version}, &mcp.ServerOptions{Instructions: instructions})
+	text := instructions
+	if pinned = pinFromEnv(); pinned != "" {
+		text += "\nThis server is pinned to the profile \"" + pinned + "\": every session runs there and no other profile can be chosen."
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: "brojev", Version: version.Version}, &mcp.ServerOptions{Instructions: text})
 	register(s)
 	return s
 }
 
-var instructions = `brojev drives Chrome profiles (logins persist in each profile; the default is a dedicated one).
+const instructions = `brojev drives Chrome profiles (logins persist in each profile; the default is a dedicated one).
 Fast path: call run with a concrete goal (and values you already know); it executes the whole sub-task in a few seconds and returns the final page.
 Use the primitive tools (snapshot, click, type, ...) when run returns needs_claude/blocked, for canvas or unusual widgets, or for exact control.
 A blocked or needs_claude result is a hand-off, not the end: do that step yourself, then resume run, and keep going until the task is verifiably done or stops making progress.
 Refs like e12 / f2e5 come from the latest snapshot; take a new one if a ref is stale.
 Other Claude sessions may use the browser at the same time; you only see and touch your own tabs.
 A session is one browser window on one profile. Pass a short "session" name on every call to get a window of your own (parallel subagents must do this); the same name always comes back to the same window.
-Pass "profile" to work on another profile (list them with the profile tool): a new session name with a profile opens a window there, and several sessions can run on different profiles side by side. A session never changes profile.` + pinNote
+Pass "profile" to work on another profile (list them with the profile tool): a new session name with a profile opens a window there, and several sessions can run on different profiles side by side. A session never changes profile.`
 
 type empty struct{}
 
@@ -54,14 +58,19 @@ type Sess struct {
 // or change the profile list. Unset, the agent chooses freely.
 const PinEnv = "BROJEV_PIN_PROFILE"
 
-var pinned = strings.TrimSpace(os.Getenv(PinEnv))
+// pinned is the pin of this process, read once when the server is built.
+var pinned string
 
-var pinNote = func() string {
-	if pinned == "" {
-		return ""
+// pinFromEnv reads the pin: the plugin setting (which arrives as an
+// unexpanded "${...}" placeholder when unset) wins over the variable.
+func pinFromEnv() string {
+	for _, k := range []string{"BROJEV_SETTING_PIN_PROFILE", PinEnv} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" && !strings.HasPrefix(v, "${") {
+			return v
+		}
 	}
-	return "\nThis server is pinned to the profile \"" + pinned + "\": every session runs there and no other profile can be chosen."
-}()
+	return ""
+}
 
 // applyPin makes a daemon call obey the pin: browser calls run on the pinned
 // profile and the profile tool is read-only.

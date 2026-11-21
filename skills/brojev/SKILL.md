@@ -77,14 +77,18 @@ Several Claude sessions can use brojev at once. Each gets its own browser window
 - `tabs` lists only your tabs. A tab that another session opened is off limits: `tabs action=switch` or `close` on it fails unless you pass `shared=true`, which you should do only when the user asked for it.
 - Popups opened by your page are yours. Tabs that belong to a person (attach mode) are never closed by brojev.
 - When your Claude session ends, brojev closes its windows after about a minute. In attach mode (the user's real Chrome) the windows stay open.
-- Parallel subagents inside one Claude session share one brojev process and would share one tab. Give each subagent its own short name and pass it as `session` on every brojev call (`session: "research-1"`, also in `batch` and `run`). Without a name, subagents use the same window and tab as you.
-- At most 8 sessions at a time. `profile action=use` refuses while other sessions are active; pass `force=true` only with the user's consent, since switching drops their tabs.
+- A session is one browser window on one profile. Pass a short name as `session` on every brojev call (`session: "research-1"`, also in `batch` and `run`) to get a window of your own; the same name always comes back to the same window. Parallel subagents inside one Claude session share one brojev process, so each must use its own name. Without a name you use your default window.
+- At most 8 sessions at a time.
 
 ## Profiles
 
 - `profile` lists Chrome profiles; each keeps its own logins. Built-ins: `default` (dedicated `~/.brojev/profile`) and `chrome` (the user's real Chrome, attach mode).
 - `profile action=add name=work` creates a fresh dedicated profile; add `dir` for an existing Chrome data dir and `chromeProfile` ("Default", "Profile 3", see `action=chrome-profiles`) to pick a person inside it.
-- `profile action=use name=...` switches; the next browser call reconnects. Switch to the real `chrome` profile only when the user asks: it exposes their personal sessions and page text goes to the Jev API.
+- Every profile runs its own Chrome, and several can be in use at once. To work on one, pass `profile: "work"` together with a `session` name: `navigate session=shop profile=work url=...` opens a window on `work`, and later calls with `session=shop` come back to it (the profile need not be repeated). A second session can run on another profile at the same time.
+- A session never changes profile: asking for an existing session with another profile is an error. Use a new session name for another profile.
+- Without `profile`, a session starts on the default profile. `profile action=use name=...` changes that default for sessions started later; running sessions keep their profile and their tabs.
+- If the server is pinned to one profile (its instructions say so), every session runs there and `profile` can only list.
+- Use the real `chrome` profile only when the user asks: it exposes their personal sessions and page text goes to the Jev API.
 
 ## Setup and troubleshooting
 

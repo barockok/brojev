@@ -1,109 +1,85 @@
 # Multi-profile sessions: one daemon, many profiles
 
-Date: 2026-11-20
-Status: design validated, not implemented
+Date: 2026-11-20 (revised 2026-11-21)
+Status: implemented on `feat/multi-profile-sessions`
 
 ## Goal
 
-One brojevd serves several Chrome profiles at once. A session is a named
-group of windows, and each window is bound to one profile. The agent process
-is no longer the unit of identity: one process can run many sessions, on
-different profiles, and any client that uses the same session name and
-profile gets the same window.
-
-## Today
-
-- The daemon holds one active profile (`s.prof`) and one browser (`s.browser`).
-- `profile use` swaps that browser for every session and drops all tabs
-  (guarded by `otherLiveBases` and `force`).
-- A session id is issued by the brojev-mcp process, not by the agent:
-  `$BROJEV_SESSION`, then `$CLAUDE_CODE_SESSION_ID`, then `mcp-<hex>`. The
-  per-call `session` param is a subagent suffix (`<base>#sub`).
-- Cleanup hangs off a per-process lease (`hello`) with a grace period.
+One brojevd serves several Chrome profiles at once. An agent can work on one
+profile or on several side by side, and a user can pin an agent to a single
+profile from the MCP config.
 
 ## Model
 
-- **Window key = `(session, profile)`.** `work` on profile A and `work` on
-  profile B are two windows in two browsers. The same pair always returns the
-  same window.
-- A session is a global name that groups windows. It carries no profile and
-  no lock.
-- Tab ownership (`owner`, `canTouch`, `shared`), the current tab and the
-  action queue are per window. Windows run in parallel.
-- A call that names no session gets an automatic per-process session (today's
-  id), so unrelated agents do not collide by accident. Only an explicitly
-  chosen name is shared.
+- **One daemon, many profiles.** Each profile in use has its own Chrome.
+- **A session is one window on one profile.** The profile is set when the
+  session starts and never changes: a window cannot be in two profiles.
+- **The agent chooses.** Every tool takes `session` (a name the agent picks)
+  and `profile` (optional).
+  - Same session name again: back to the same window.
+  - New name, same profile: a second window in that Chrome.
+  - New name, another profile: a window in another Chrome.
+  - An existing session with another profile: an error that names both.
+- **No session name** means "my default window on that profile". A caller has
+  one such window per profile, so `profile=work` without a name still works.
+- **No profile** means the default profile (`profile use` sets it). Changing
+  the default only affects sessions started later; running sessions keep
+  their profile and their tabs.
+- **Pin.** With `BROJEV_PIN_PROFILE` in the MCP server's env (or the plugin
+  setting "Pin to one Chrome profile"), every session of that server runs on
+  the pinned profile. Another `profile` is refused, and the `profile` tool can
+  only list. Without a pin the agent chooses freely.
 
-## Browser pool
+Session names stay private to each agent process, as before, so two Claude
+Code instances that both pick `research-1` do not share a window.
 
-- `map[userDataDir] -> *browser`, replacing `s.browser` and `s.prof`.
-  Attach mode and external CDP are their own keys.
-- Chrome cannot open one user-data-dir twice, so two profile names that point
-  at the same `Dir` share one browser.
-- A browser launches lazily on a window's first action and is refcounted by
-  windows. When the last window closes, the browser lingers briefly and then
-  quits. The daemon never quits an attach-mode or external Chrome; there it
-  closes only its own tabs.
-- Caps: the existing `maxSessions`, plus a cap on concurrent browsers.
+## Daemon
 
-## Profile resolution
+- `Server.links`: one `link` per Chrome data dir, holding the CDP connection,
+  the attached pages and the tab owners. This replaces the single
+  `browser`/`prof`/`pages`/`owner` of the server.
+- Each link has its own connect lock, so an attach-mode profile waiting for
+  the user's Allow click does not block the other profiles.
+- A session holds its profile and its link. Tab ownership, the current tab
+  and the action queue are per session, as before.
+- Chrome runs one instance per data dir. Profiles on the same dir and the same
+  person share a link. A different person in a dir that sessions are using is
+  refused; an idle dir is switched, as `profile use` did before.
+- A dropped connection (Chrome quit) forgets only that link's tabs.
+- `BROJEV_CDP_URL` and `BROJEV_PROFILE` put the daemon on one browser; a
+  profile chosen per session is refused there.
+- `profile use` no longer disconnects anything. `--quit` closes the previous
+  default's Chrome and is refused while other sessions work there (unless
+  `force`).
+- `status` takes `profile` and lists the live browsers with their sessions.
+- The default state file carries the profile name, so logins saved from one
+  profile are not loaded into another by default.
 
-`resolveWindow(session, profile?)`, in order:
+## MCP layer
 
-1. **Pin.** If the MCP config pins a profile (env var sent in `hello`), the
-   profile is that one, and a different `profile` param is an error. The
-   daemon enforces this, not the MCP layer.
-2. **Explicit `profile` param.** Use that window, creating it if needed. It
-   becomes the session's current window.
-3. **Sticky.** Profile omitted: the session's most recently used window.
-4. **Default.** A new session with no profile: the config's default profile.
+- `Sess` (embedded in every tool input) has `session` and `profile`.
+- `applyPin` runs on every daemon call: it sets the pinned profile, refuses
+  another one, and makes the `profile` tool read-only. The pin guards the
+  agent, not the socket: any local process of the same user can still talk to
+  the daemon directly, as it always could.
 
-Every response echoes the resolved `{session, profile}` so an agent can see
-which window it landed on.
+## Cleanup
 
-Attach-mode profiles keep the existing consent rule and need an explicit
-grant before an open (unpinned) agent can use them.
+Unchanged: when an agent process goes away, its windows close after the grace
+period (not in attach mode or on an external Chrome). Chrome itself keeps
+running, as before.
 
-## Lifecycle
+## Not done
 
-- **Named sessions:** a window closes after an idle TTL (default 30 minutes,
-  configurable). A later call recreates it. They do not die when the creating
-  process disconnects.
-- **Auto sessions:** tied to the process lease, cleaned up after the grace
-  period, as today.
-- **Explicit close:** `session close` closes one window or a whole session.
-- **Daemon restart or Chrome crash:** windows are recreated lazily on the next
-  call. Tab state is lost, as today.
+- No cap on the number of Chromes. The session cap (8) bounds it in practice.
+- The daemon does not quit an idle profile's Chrome on its own.
+- Downloads of all profiles still go to one `~/.brojev/downloads` directory.
+- Running two people of the same Chrome data dir at once.
 
-## Protocol and tools
+## Tests
 
-- Requests carry `{session, profile?}`. The MCP layer fills in the auto id
-  when the agent names none. The `#suffix` composition goes away.
-- New `session` tool: `list` (windows, profile, tabs, idle time), `close`,
-  `ttl`.
-- `profile` tool: `list/add/remove/chrome-profiles` stay. `use` only sets the
-  default for new sessions; it no longer swaps a global browser.
-- `profile list` reports live sessions and browsers per profile.
-
-## Errors
-
-- Unknown profile: list the registered names.
-- Pinned process asks for another profile: "this MCP is pinned to X".
-- Session or browser cap reached: say which cap and which windows could close.
-- Attach profile without a grant: refuse and point at the consent step.
-
-## Testing
-
-- Unit: `resolveWindow` (pin, explicit, sticky, default, same-`Dir` sharing),
-  idle TTL with a fake clock, browser refcount and linger.
-- Daemon e2e: two sessions on two profiles run in parallel with no tab
-  leakage; the same name from two clients reaches the same window.
-- Regression: the CLI default session and the single-profile flows behave as
-  before.
-
-## Open points for the implementation plan
-
-- Default TTL and linger values.
-- Whether `profile use` is kept as a default-setter or removed.
-- Migration of `BROJEV_PROFILE` (today it overrides the active profile) into
-  the pin semantics.
+- Unit: `TestSessionIsLockedToItsProfile`, `TestUnnamedSessionPerProfile`,
+  `TestSharedDataDir`, `TestExternalChromeHasNoProfiles`, `TestResolve`,
+  `TestApplyPin`, `TestPinFromEnv`.
+- End to end (`BROJEV_E2E=1`, real Chrome): `TestProfilesSideBySide`,
+  `TestPinnedServer`, `TestSessionLeaseCleansUp`.
