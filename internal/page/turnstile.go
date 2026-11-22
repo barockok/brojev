@@ -35,13 +35,14 @@ const turnstileRootsJS = `(() => {
 
 const turnstileDetectJS = `(() => {
   const out = {interstitial:false, widgets:[], url:location.href};
+  // A full-page challenge can carry widget markers of its own (a response
+  // input); it is still a challenge page, cleared by leaving it.
+  const title = (document.title || "").trim().toLowerCase();
+  out.interstitial = !!document.querySelector('#challenge-stage, #cf-challenge-running, .cf-browser-verification')
+    || title === "just a moment..." || title.indexOf("attention required") === 0;
+  if (out.interstitial) return out;
   const top = ` + turnstileRootsJS + `;
-  if (!top.length) {
-    const title = (document.title || "").trim().toLowerCase();
-    out.interstitial = !!document.querySelector('#challenge-stage, #cf-challenge-running, .cf-browser-verification')
-      || title === "just a moment..." || title.indexOf("attention required") === 0;
-    return out;
-  }
+  if (!top.length) return out;
   const fallback = top.length === 1 ? document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]') : null;
   for (const root of top) {
     const get = (k) => (root.getAttribute && root.getAttribute(k)) || (root.querySelector && root.querySelector("[" + k + "]")?.getAttribute(k)) || "";
@@ -272,7 +273,7 @@ func (p *Page) DetectTurnstile(ctx context.Context) *turnstile.Status {
 		return &turnstile.Status{State: turnstile.StateUnresolved, Reason: "detection failed: " + err.Error()}
 	}
 	if interstitial {
-		return &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Reason: "full-page Cloudflare challenge"}
+		return &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Mode: turnstile.ModeInterstitial}
 	}
 	return statusOfMany(ws)
 }
@@ -326,7 +327,7 @@ func statusOf(w *tsWidget, inner *tsInner) *turnstile.Status {
 	if w.Interstitial {
 		st.Detected = true
 		st.State = turnstile.StateInterstitial
-		st.Reason = "full-page Cloudflare challenge"
+		st.Mode = turnstile.ModeInterstitial
 		return st
 	}
 	if !w.Present {
@@ -517,7 +518,7 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 		return &turnstile.Status{State: turnstile.StateUnresolved, Reason: "detection failed: " + err.Error()}
 	}
 	if interstitial {
-		return &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Reason: "full-page Cloudflare challenge"}
+		return p.resolveInterstitial(ctx, o, inPage)
 	}
 	if len(ws) == 0 {
 		return &turnstile.Status{State: turnstile.StateAbsent}
@@ -558,7 +559,7 @@ func (p *Page) ensureTurnstile(ctx context.Context, o turnstileOptions) *turnsti
 	if derr != nil || finalInterstitial || len(finalWs) == 0 {
 		final := initial
 		if finalInterstitial {
-			final = &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Reason: "full-page Cloudflare challenge"}
+			final = &turnstile.Status{Detected: true, State: turnstile.StateInterstitial, Mode: turnstile.ModeInterstitial}
 		} else if len(finalWs) == 0 {
 			final.State = turnstile.StateUnresolved
 			final.Reason = "widgets disappeared after resolution"
@@ -763,17 +764,23 @@ func (p *Page) tryTurnstileInPage(ctx context.Context, w *tsWidget, wf *frame, i
 }
 
 func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget time.Duration, index int) (bool, string, bool, float64, int64) {
+	clip, err := p.turnstileVisualClip(ctx, index)
+	if err != nil {
+		return false, "clip failed: " + err.Error(), false, 0, 0
+	}
+	return p.tryVisualClick(ctx, v, budget, clip, func(c context.Context) bool { return p.turnstileTokenAt(c, index) != "" }, "no token")
+}
+
+// tryVisualClick screenshots clip, asks the locator for the checkbox, clicks
+// it and waits up to budget for passed. pending names what is missing when it
+// does not pass ("no token", "challenge page still shown").
+func (p *Page) tryVisualClick(ctx context.Context, v turnstileVisual, budget time.Duration, clip Clip, passed func(context.Context) bool, pending string) (bool, string, bool, float64, int64) {
 	if budget <= 0 {
 		budget = 8 * time.Second
 	}
 	// A background tab can stall Page.captureScreenshot on headless Linux
 	// even when focus emulation reports it visible.
 	_, _ = cdproto.Call(ctx, p.S, cdppage.BringToFront, cdproto.Empty{})
-	start := time.Now()
-	clip, err := p.turnstileVisualClip(ctx, index)
-	if err != nil {
-		return false, "clip failed: " + err.Error(), false, 0, 0
-	}
 	img, err := p.ScreenshotClip(ctx, clip)
 	if err != nil {
 		return false, "screenshot failed: " + err.Error(), false, 0, 0
@@ -792,10 +799,10 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 	cost, ms := res.CostUSD, res.MS
 	switch res.State {
 	case "verified":
-		if p.turnstileTokenAt(ctx, index) != "" {
+		if passed(ctx) {
 			return true, "", true, cost, ms
 		}
-		return false, "verified but no token", true, cost, ms
+		return false, "verified but " + pending, true, cost, ms
 	case "image_challenge":
 		return false, "image challenge", true, cost, ms
 	}
@@ -808,14 +815,14 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 	if _, err := p.ClickXY(ctx, cx, cy, ClickOptions{}); err != nil {
 		return false, "click failed: " + err.Error(), true, cost, ms
 	}
-	start = time.Now()
+	start := time.Now()
 	retried := false
 	for {
-		if p.turnstileTokenAt(ctx, index) != "" {
+		if passed(ctx) {
 			return true, "", true, cost, ms
 		}
 		if time.Since(start) > budget {
-			return false, "no token after visual click", true, cost, ms
+			return false, pending + " after visual click", true, cost, ms
 		}
 		if !retried && time.Since(start) > 1500*time.Millisecond {
 			retried = true
@@ -823,7 +830,7 @@ func (p *Page) tryTurnstileVisual(ctx context.Context, v turnstileVisual, budget
 		}
 		select {
 		case <-ctx.Done():
-			return false, "no token after visual click", true, cost, ms
+			return false, pending + " after visual click", true, cost, ms
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
@@ -866,6 +873,14 @@ func (p *Page) turnstileVisualClip(ctx context.Context, index int) (Clip, error)
 	if vp.W <= 0 || vp.H <= 0 {
 		return Clip{}, errors.New("viewport unavailable")
 	}
+	return clipAround(base, vp.W, vp.H)
+}
+
+// clipAround frames base plus 40 px of context inside a vpW x vpH viewport,
+// caps the crop for the image API, and picks a scale inside its 256 to
+// 1568 px window.
+func clipAround(base *tsRect, vpW, vpH float64) (Clip, error) {
+	vp := struct{ W, H float64 }{vpW, vpH}
 	x0 := math.Max(0, base.X-40)
 	y0 := math.Max(0, base.Y-40)
 	cw := math.Min(base.W, 900) + 80

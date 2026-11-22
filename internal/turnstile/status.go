@@ -17,6 +17,9 @@ const (
 	ModeManaged   = "managed"
 	ModeInvisible = "invisible"
 	ModeUnknown   = "unknown"
+	// ModeInterstitial is a full-page challenge ("Just a moment..."), cleared
+	// by leaving the challenge page rather than by a widget token.
+	ModeInterstitial = "interstitial"
 )
 
 // CostPerSolveUSD is CapSolver's Cloudflare Turnstile list price: $1.20 per
@@ -51,6 +54,9 @@ func (s *Status) Line() string {
 	case StateSolved:
 		return "TURNSTILE: solved"
 	case StateInterstitial:
+		if s.Reason != "" {
+			return "TURNSTILE: interstitial (full-page Cloudflare challenge; " + s.Reason + ")"
+		}
 		return "TURNSTILE: interstitial (full-page Cloudflare challenge)"
 	default:
 		if s.Reason != "" {

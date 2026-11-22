@@ -151,7 +151,11 @@ func (r *Runner) Run(ctx context.Context, t Task) (*Outcome, error) {
 		if ts != nil && ts.Detected {
 			out.Turnstile = ts
 			if ts.State == turnstile.StateInterstitial {
-				return finish(p, "blocked", "turnstile unsolved: full-page Cloudflare challenge")
+				msg := "turnstile unsolved: full-page Cloudflare challenge"
+				if ts.Reason != "" {
+					msg += " (" + ts.Reason + ")"
+				}
+				return finish(p, "blocked", msg)
 			}
 			if ts.State == turnstile.StateUnresolved && len(snap.Elements) == 0 && strings.TrimSpace(snap.Text) == "" {
 				return finish(p, "blocked", "turnstile unsolved: "+ts.Reason)
